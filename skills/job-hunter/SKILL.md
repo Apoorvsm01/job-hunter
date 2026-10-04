@@ -1,6 +1,6 @@
 ---
 name: job-hunter
-version: 1.4.0
+version: 1.6.0
 description: Run the full job-hunter pipeline — search, review (local LLM or this agent itself, your choice), and radar report — end to end for a keyword/title search or the candidate profile's standing criteria.
 compatibility: Requires uv and Python 3.11+. LM Studio required only when the LM Studio review engine is chosen; the Claude engine needs no local model.
 metadata:
@@ -14,7 +14,7 @@ metadata:
 
 Use this skill only when the user explicitly asks to search or evaluate current jobs **and wants
 the complete pipeline run end to end**. For a single stage — "just re-render the radar," "resume
-reviewing ADAS," "check what's failing on Ford" — use `job-scout` / `job-reviewer` / `job-radar`
+reviewing Analytics," "check what's failing on Acme" — use `job-scout` / `job-reviewer` / `job-radar`
 directly instead; each is the canonical, standalone procedure for its own stage.
 
 ## Engine choice — ask every time, unless already stated
@@ -35,11 +35,13 @@ cross-runtime support for one skill invoking another isn't guaranteed across eve
 this project installs into — the Claude path below restates the relevant `job-reviewer` steps
 inline for that reason, it doesn't skip them.
 
+For a long or rate-limited collection that should not block this run, see `job-scout`'s "Background collection" section (`collect start`, then `snapshot` and `pipeline --no-scrape --search <path>`).
+
 ## Examples
 
 - `/job-hunter` — engine not stated; ask, then full pipeline, profile-driven (no keyword)
-- `/job-hunter ADAS with Claude` — Claude engine, full pipeline scoped to one keyword
-- `/job-hunter ADAS or Robotics or "Product Technical Leader"` — full pipeline, multiple
+- `/job-hunter Analytics with Claude` — Claude engine, full pipeline scoped to one keyword
+- `/job-hunter Analytics or "Product Manager" or "Data Engineer"` — full pipeline, multiple
   keywords/phrases, comma-joined into one `--keyword` under the hood
 - `/job-hunter --no-scrape` — you (or the user) just edited `candidate_profile.yaml` and want the
   report to reflect it against jobs already collected, with no new scrape; add `--review` to also
@@ -90,7 +92,7 @@ Output:
 4. Decide the mode:
    - **Normal (default) — a fresh live search:**
      ```bash
-     uv run job-hunter pipeline --project "$CLAUDE_PROJECT_DIR" [--keyword "ADAS,Robotics,Product Technical Leader"]
+     uv run job-hunter pipeline --project "$CLAUDE_PROJECT_DIR" [--keyword "Analytics,Data Engineer,Product Manager"]
      ```
      Runs search → review → radar end to end. `--skip-review`/`--skip-radar` stop the run early if
      the user only wants a subset; `--limit` caps *new* reviews this run — only pass it if the user
@@ -122,6 +124,9 @@ Output:
    relay `error` verbatim. Report `candidates`, and — once review ran — `reviewed`/
    `skipped_cached`/`failed`; for a `--no-scrape` run, also report `gained`/`lost`/`diff_report`
    from the refilter stage (the same vocabulary `refilter_archive.py`'s own HTML diff report uses).
+   A `partial` status can also mean a source was rate limited or timed out: it kept the jobs it had
+   already fetched, is listed under `rate_limited_sources` in the manifest, and is named in the
+   radar's Collection Issues with the reason — relay that to the user.
 6. Compile and present the results exactly as `job-radar`'s `SKILL.md` describes it — its step 5
    (tiering into Strong/For-review, `[90+]`/`[80+]`/`[New]` tags) and step 10 (never invent salary,
    sponsorship, arrangement, qualifications, or posting dates) apply here unchanged; this skill
@@ -140,7 +145,7 @@ instead of one, but the same net result and the same final report format.
 
 4. Search only, no review/radar yet:
    ```bash
-   uv run job-hunter pipeline --project "$CLAUDE_PROJECT_DIR" --skip-review --skip-radar [--keyword "ADAS,Robotics,Product Technical Leader"]
+   uv run job-hunter pipeline --project "$CLAUDE_PROJECT_DIR" --skip-review --skip-radar [--keyword "Analytics,Data Engineer,Product Manager"]
    ```
    `--no-scrape` mode doesn't apply to this path — its `--review` flag would route straight back
    into the LM Studio subprocess, which defeats the point of choosing Claude. If the user wants a
@@ -160,7 +165,7 @@ instead of one, but the same net result and the same final report format.
 7. Render directly (this step is Python-owned and engine-agnostic either way, so it's the same
    command Path A's `pipeline` would have run internally):
    ```bash
-   uv run python scripts/render_radar.py --project "$CLAUDE_PROJECT_DIR" [--keyword "ADAS,Robotics,Product Technical Leader"]
+   uv run python scripts/render_radar.py --project "$CLAUDE_PROJECT_DIR" [--keyword "Analytics,Data Engineer,Product Manager"]
    ```
 8. Compile and present the results exactly as step 6 (Path A) and `job-radar`'s `SKILL.md`
    describe — identical tiering, tags, and Collection Issues handling; only the scorer differed.

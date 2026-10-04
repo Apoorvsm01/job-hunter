@@ -5,7 +5,7 @@ version: 1
 # to get past a Cloudflare/Akamai-style bot-management challenge — a deliberate choice for
 # this project, made with the understanding that it can conflict with a site's Terms of
 # Service. Prefer every other adapter first; only reach for it when no plain anonymous
-# endpoint exists at all. Requires `uv sync --extra stealth && uv run scrapling install`.
+# endpoint exists at all. Requires `uv sync --all-extras && uv run scrapling install`.
 companies:
   - key: honda
     company: American Honda Motor Co.
@@ -15,6 +15,18 @@ companies:
       # Full pagination (from/s params) — see PhenomAdapter's docstring for how these
       # were found (rendering the page once to read its own generated links).
       list_url: https://careers.honda.com/us/en/search-results
+      keywords: ""
+  - key: abb
+    company: ABB
+    adapter: phenom
+    platform: phenom
+    config:
+      # careers.abb (Phenom People) eager-loads results into embedded JSON
+      # (eagerLoadRefineSearch) with from/s pagination; detail pages carry
+      # schema.org JobPosting JSON-LD. The Workday backend
+      # (abb.wd3.myworkdayjobs.com) is global-only — no country facet works
+      # for filtering, so Phenom is the proper access path.
+      list_url: https://careers.abb/global/en/search-results
       keywords: ""
   - key: toyota
     company: Toyota Motor North America
@@ -97,6 +109,18 @@ companies:
       # (full description, qualifications, and posting date included, no separate detail
       # fetch needed) with real $top/$skip pagination — no browser needed at all.
       career_site_domain: stellantisexternalcx
+  - key: fanuc
+    company: FANUC America
+    adapter: adp_recruiting
+    platform: adp_recruiting
+    config:
+      # myjobs.adp.com/fanuc/cx is an ADP Recruiting Management SPA (no server-rendered
+      # content). Public two-call handshake: /public/staffing/v1/career-site/fanuc returns
+      # myJobsToken, replayed as myjobstoken header on the listing endpoint. Returns all
+      # 43 requisitions in one call ($top=100) with full description, qualifications,
+      # postingDate, and structured address — no separate detail fetch needed. Confirmed
+      # sorted newest-first (verified across full catalog); early-stop viable.
+      career_site_domain: fanuc
   - key: nissan
     company: Nissan
     adapter: workday
@@ -114,6 +138,21 @@ companies:
     adapter: successfactors_rmk
     platform: successfactors_rmk
     config:
+      # This one entry already covers every U.S. posting on the whole Volkswagen Group site, which
+      # is shared by all brands — the brand/legal entity is only the URL path segment
+      # (/Volkswagen/job/…, /Audi/job/…, /Lamborghini/…, /Electrify_America/…, /cariad/…).
+      # Verified 2026-10-02 (when vwiecc.com and an Audi job were proposed as separate sources):
+      #  - vwiecc.com/careers (VW Innovation and Engineering Center California, Belmont CA) is a
+      #    Squarespace page with no job list of its own; its "Current Openings" link goes to
+      #    jobs.volkswagen-group.com. Its Belmont CA roles are already rows here (/Volkswagen/ path).
+      #  - The sample Audi job (…/Audi/job/San-Jose-Development-Engineer-Sr-Software-CA-95134/
+      #    1426701533/) was already stored under this source; the live US query returned 16 results
+      #    against 15 active rows here. A separate vwiecc/audi entry would only duplicate rows.
+      #  - The search form's "Company" facet (optionsFacetsDD_facility) cannot split them: its
+      #    <select> is empty in the static HTML, and five different plausible values (Audi,
+      #    Volkswagen, Elli, CARIAD, "Audi AG") all returned the identical result set, i.e. the
+      #    parameter is silently ignored. The real facet values would need a one-time browser
+      #    drive to observe (as was done for Molex) before a per-brand source could exist.
       list_url: https://jobs.volkswagen-group.com/search/?locale=en_US&optionsFacetsDD_country=US
       card_selector: tr.data-row
       link_selector: a.jobTitle-link
@@ -345,38 +384,79 @@ companies:
       description_selector: .DkhPwc
   - key: waymo
     company: Waymo
-    adapter: stealth_html
-    platform: html
+    adapter: greenhouse
+    platform: greenhouse
     config:
-      # careers.withwaymo.com is behind a CloudFront WAF (request-rate challenge) that
-      # blocks plain httpx with HTTP 202 challenge. stealth_html uses Scrapling's
-      # AsyncStealthySession (headless browser) which bypasses the WAF — confirmed live:
-      # a real browser renders all 30+ job cards per page across 12 pages.
-      # Selectors verified via browser inspection (Sep 2026):
-      # card: div.job-search-results-card (also matches <article> tags)
-      # title/link: h3.card-title.job-search-results-card-title > a
-      # location: span[id^="location_icon_text_"]
-      # department: span[id^="department_icon_text_"]
-      # employment_type: span[id^="employment_type_icon_text_"]
-      # summary: p.card-text.job-search-results-summary
-      # WAF throttles rapid requests — pace them to avoid sticky challenge.
-      # stealth_html adapter returns partial results on timeout (graceful degradation).
-      # DETAIL PAGES ARE BLOCKED: Waymo's WAF blocks almost every detail page.
-      # Extract everything from listing cards and skip detail-page fetching.
-      list_url: https://careers.withwaymo.com/jobs/search
-      card_selector: div.job-search-results-card
-      link_selector: h3.card-title.job-search-results-card-title a
-      title_selector: h3.card-title.job-search-results-card-title a
-      location_selector: span[id^="location_icon_text_"]
-      department_selector: span[id^="department_icon_text_"]
-      employment_type_selector: span[id^="employment_type_icon_text_"]
-      description_selector: p.card-text.job-search-results-summary
-      page_number_parameter: page
-      page_size: 30
-      wait_selector: div.job-search-results-card
-      min_request_interval_seconds: 5.0
-      max_retries: 3
-      skip_detail_fetch: true
+      # ===== METHOD IN USE (since 2026-10-01): Greenhouse public job-board API, plain httpx =====
+      # careers.withwaymo.com is a skin over Greenhouse (its job links are ?gh_jid=<id>), and the
+      # board token is plain "waymo": boards-api.greenhouse.io/v1/boards/waymo/jobs is a public,
+      # unauthenticated feed (same family as the anthropic/zipline entries). Confirmed live
+      # 2026-10-01: ONE request returns ~360 jobs with full descriptions (content=true, median
+      # ~4.7k chars), a department and first_published (posting date) on every job, and
+      # absolute_url = the real candidate-facing page. It never touches careers.withwaymo.com
+      # (whose robots.txt asks for Crawl-delay: 5 and disallows /api/ and ?gh_jid=), so there is
+      # no WAF to defeat, no stealth browser, and no per-job detail fetch. `content` arrives
+      # HTML-entity-double-encoded; GreenhouseAdapter unescapes it once.
+      # Switching changed job ids (card-scrape ids were hashes of title/location/url; these are
+      # Greenhouse's numeric ids), so rows collected by the old method are a separate set that
+      # ages out via mark_missing (3 missed runs) — and their cached assessments don't carry over.
+      list_url: https://boards-api.greenhouse.io/v1/boards/waymo/jobs?content=true
+      items_path: jobs
+      listing_description_path: content
+      fields:
+        id: id
+        title: title
+        url: absolute_url
+        location: location.name
+        department: departments.0.name
+        posted_at: first_published
+      #
+      # ===== PREVIOUS METHOD (used until 2026-10-01; kept for reference / rollback) =====
+      # stealth_html: a real headless browser (Scrapling) paging through the careers site's
+      # listing cards behind an AWS WAF request-rate challenge. Why it was replaced: it only ever
+      # saw the cards (WAF blocks nearly every detail page), so every job's "description" was the
+      # same ~250-char company blurb (useless for LLM review) and it had no posting date; the
+      # challenge also tripped partway through (a page-8 navigation timeout on 2026-09-30 kept
+      # only 210 of ~360 jobs, and before page-number pagination was restored it saw just page 1);
+      # and it needs the optional `stealth` extra + a browser binary, with real ToS exposure.
+      # To roll back: replace this entry's `adapter`/`platform`/`config` with the block below
+      # (remove the "# | " prefix) — the stealth extra must be installed
+      # (`uv sync --all-extras && uv run scrapling install`).
+      #
+      # |   - key: waymo
+      # |     company: Waymo
+      # |     adapter: stealth_html
+      # |     platform: html
+      # |     config:
+      # |       # careers.withwaymo.com is behind a CloudFront WAF (request-rate challenge) that
+      # |       # blocks plain httpx with HTTP 202 challenge. stealth_html uses Scrapling's
+      # |       # AsyncStealthySession (headless browser) which bypasses the WAF — confirmed live:
+      # |       # a real browser renders all 30+ job cards per page across 12 pages.
+      # |       # Selectors verified via browser inspection (Sep 2026):
+      # |       # card: div.job-search-results-card (also matches <article> tags)
+      # |       # title/link: h3.card-title.job-search-results-card-title > a
+      # |       # location: span[id^="location_icon_text_"]
+      # |       # department: span[id^="department_icon_text_"]
+      # |       # employment_type: span[id^="employment_type_icon_text_"]
+      # |       # summary: p.card-text.job-search-results-summary
+      # |       # WAF throttles rapid requests — pace them to avoid sticky challenge.
+      # |       # stealth_html adapter returns partial results on timeout (graceful degradation).
+      # |       # DETAIL PAGES ARE BLOCKED: Waymo's WAF blocks almost every detail page.
+      # |       # Extract everything from listing cards and skip detail-page fetching.
+      # |       list_url: https://careers.withwaymo.com/jobs/search
+      # |       card_selector: div.job-search-results-card
+      # |       link_selector: h3.card-title.job-search-results-card-title a
+      # |       title_selector: h3.card-title.job-search-results-card-title a
+      # |       location_selector: span[id^="location_icon_text_"]
+      # |       department_selector: span[id^="department_icon_text_"]
+      # |       employment_type_selector: span[id^="employment_type_icon_text_"]
+      # |       description_selector: p.card-text.job-search-results-summary
+      # |       page_number_parameter: page
+      # |       page_size: 30
+      # |       wait_selector: div.job-search-results-card
+      # |       min_request_interval_seconds: 5.0
+      # |       max_retries: 3
+      # |       skip_detail_fetch: true
   - key: hatci
     company: Hyundai America Technical Center, Inc.
     adapter: successfactors_rmk
@@ -653,28 +733,26 @@ companies:
       location_filter: United States
   - key: wayve
     company: Wayve
-    adapter: html_paginated
-    platform: first_ats
+    adapter: ashby
+    platform: ashby
     config:
-      # The tracked-companies snapshot listed Wayve as Greenhouse
-      # (job-boards.greenhouse.io/wayve), but that URL now 302-redirects to
-      # wayve.firststage.co/jobs — Wayve has moved off Greenhouse entirely onto "First"
-      # (firststage.co), a Next.js-based ATS. Its /jobs listing is plain
-      # server-rendered HTML (confirmed: a job's real ID appears identically in a plain
-      # curl fetch and a Playwright-rendered one, same byte count) with all 163 current
-      # postings on one page — no pagination config needed. Its cards have no wrapping
-      # element: each posting is a single `<a href="https://wayve.firststage.co/jobs/
-      # <id>/view">` with the title and location(s) as child spans directly inside it,
-      # so card_selector and link_selector both resolve to the *same* node — link_selector:
-      # self is html_paginated.py's opt-in for exactly this shape (see its comment).
-      # The detail page carries a schema.org JobPosting JSON-LD block (clean HTML,
-      # real datePosted) that html_paginated's fetch_detail already always checks
-      # regardless of config, so no description_selector is needed here at all.
-      list_url: https://wayve.firststage.co/jobs
-      card_selector: a[href*="/jobs/"][href*="/view"]
-      link_selector: self
-      title_selector: span.font-medium
-      location_selector: span.capitalize
+      # Wayve is on Ashby (jobs.ashbyhq.com/wayve), confirmed via its public posting API
+      # (62 jobs, full descriptionHtml inline). It was previously scraped from
+      # wayve.firststage.co/jobs (First ATS), which on 2026-10-02 started serving "0 jobs
+      # open" and failed every run with SchemaError. Postings have no structured `address`
+      # (always null), so location is the plain string ("Sunnyvale, California USA").
+      list_url: https://api.ashbyhq.com/posting-api/job-board/wayve
+      items_path: jobs
+      listing_description_path: descriptionHtml
+      fields:
+        id: id
+        title: title
+        url: jobUrl
+        location: location
+        department: department
+        employment_type: employmentType
+        posted_at: publishedAt
+        work_arrangement: workplaceType
   - key: magna
     company: Magna International
     adapter: workday
@@ -1989,6 +2067,12 @@ companies:
       page_parameter: jobOffset
       page_size: 20
       max_pages: 40
+      # 2026-10-03: the catalog hit exactly 340 jobs (17 full pages), so the next page
+      # (jobOffset=340) is no longer a short page but an `article.article--result` holding
+      # only "No jobs found" — which the adapter read as a card with no link and failed with
+      # SchemaError after all 340 jobs were already collected. empty_page_text treats that
+      # placeholder as the end of the listing (still a loud error if page 1 is empty).
+      empty_page_text: "No jobs found"
   - key: mitsubishi_motors_na
     company: Mitsubishi Motors North America
     adapter: greenhouse
@@ -2016,3 +2100,32 @@ companies:
         location: location.name
         department: departments.0.name
         posted_at: first_published
+  - key: zoox
+    company: Zoox
+    adapter: lever
+    platform: lever
+    config:
+      # zoox.com/careers links its openings to jobs.lever.co/zoox/<uuid>, so this is Lever's
+      # public postings API, same family as tri/mbrdna/woven — plain httpx, no cookies. Confirmed
+      # live 2026-10-02: GET api.lever.co/v0/postings/zoox?mode=json returns ~236 postings and
+      # the sample job (f7f84c5c-acda-4c2c-8da6-6d59bce8da25, "Manager, Sensor Integration &
+      # Cleaning Hardware", Foster City CA) is present with matching title/location/hostedUrl.
+      # Lever splits a posting across "description" (opening paragraph), "lists"
+      # (responsibilities/qualifications) and "additional" (salary + legal boilerplate), so all
+      # three are read for the description (see the tri entry). `createdAt` (epoch ms) is on
+      # every posting and is Lever's original creation time. The top-level `country` ("US"/"GB")
+      # is picked up by json_api's default `country` field, so location eligibility has a
+      # structured country rather than relying on text alone. `workplaceType` (onsite/hybrid) is
+      # opt-in via fields.work_arrangement. Zoox postings carry no `commitment`, so no
+      # employment_type is mapped. Partial caveat: ~24 postings have an empty `descriptionPlain`
+      # in the listing payload, but the three fields above still carry their content.
+      list_url: https://api.lever.co/v0/postings/zoox?mode=json
+      listing_description_path: [description, lists, additional]
+      fields:
+        id: id
+        title: text
+        url: hostedUrl
+        location: categories.location
+        department: categories.department
+        work_arrangement: workplaceType
+        posted_at: createdAt

@@ -140,6 +140,37 @@ def test_resolve_search_path_without_companies_ignores_a_scoped_archive_sharing_
     assert resolved.resolve() == unscoped.resolve()
 
 
+def test_resolve_search_path_picks_latest_filename_date_not_latest_mtime(tmp_path, monkeypatch):
+    """Regression: archives copied from another machine get arbitrary (often reversed) mtimes, and
+    the live radar with no --search then rendered an 11-day-old archive. The date in the filename
+    is the run date and survives a copy; mtime does not."""
+    monkeypatch.chdir(tmp_path)
+    search_dir = tmp_path / "data" / "searches"
+    search_dir.mkdir(parents=True)
+    old = search_dir / "default_2026-09-17.json"
+    newest = search_dir / "default_2026-09-28.json"
+    middle = search_dir / "default_2026-09-22.json"
+    for path, mtime in ((newest, 1), (middle, 2), (old, 3)):  # oldest run stamped last
+        path.write_text("{}")
+        os.utime(path, (mtime, mtime))
+
+    assert resolve_search_path().resolve() == newest.resolve()
+    assert resolve_search_path(keyword="default").resolve() == newest.resolve()
+
+
+def test_resolve_search_path_same_filename_date_falls_back_to_mtime(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    search_dir = tmp_path / "data" / "searches"
+    search_dir.mkdir(parents=True)
+    first = search_dir / "adas_2026-09-28.json"
+    second = search_dir / "default_2026-09-28.json"
+    for path, mtime in ((first, 1), (second, 2)):
+        path.write_text("{}")
+        os.utime(path, (mtime, mtime))
+
+    assert resolve_search_path().resolve() == second.resolve()
+
+
 def test_resolve_search_path_with_companies_resolves_the_scoped_archive(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     search_dir = tmp_path / "data" / "searches"
@@ -602,7 +633,81 @@ def test_resume_files_prints_all_paths_as_json(tmp_path, monkeypatch, capsys):
     assert payload["master_resume"].endswith("main_resume_2026-01-01.md")
     assert payload["master_resume_source"] == "dated"
     assert payload["personalization"].endswith("personalization.md")
+    assert payload["personalization_warning"] is None
     assert payload["cover_letter_sample"] is None and payload["review_evidence"] is None
+
+
+def test_resume_files_lints_personalization_and_lists_rules_naming_the_company(
+    tmp_path, monkeypatch, capsys
+):
+    _bare_project(tmp_path, monkeypatch)
+    directory = tmp_path / "config" / "resume"
+    directory.mkdir(parents=True)
+    (directory / "main_resume_2026-01-01.md").write_text("r")
+    (directory / "personalization.md").write_text(
+        "## resume generator\n- oops\n\n## all\n- When applying to Ford Motor Company, lead with Ford.\n"
+    )
+    assert main(["resume-files", "--company", "Ford_Motor_Company"]) == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert any("unknown section" in p for p in payload["personalization_problems"])
+    assert payload["personalization_company_rules"] == [
+        {"section": "all", "rule": "When applying to Ford Motor Company, lead with Ford."}
+    ]
+    assert "unknown section" in captured.err  # warnings are also visible in the terminal
+    # without --company the rule list is not computed at all
+    assert main(["resume-files"]) == 0
+    assert json.loads(capsys.readouterr().out)["personalization_company_rules"] is None
+
+
+def test_resume_files_jd_flag_derives_role_and_company_and_filters_role_tagged_rules(
+    tmp_path, monkeypatch, capsys
+):
+    _bare_project(tmp_path, monkeypatch)
+    directory = tmp_path / "config" / "resume"
+    directory.mkdir(parents=True)
+    (directory / "main_resume_2026-01-01.md").write_text("r")
+    (directory / "personalization.md").write_text(
+        "## resume-generator\n"
+        "- [role: program manager] Lead with program work.\n"
+        "- [role: data engineer] Lead with SQL.\n"
+        "- When applying to Globex, add a bullet.\n"
+    )
+    jd_dir = tmp_path / "data" / "output" / "Globex"
+    jd_dir.mkdir(parents=True)
+    jd = jd_dir / "JD_Globex_TPM_2026-09-28.txt"
+    jd.write_text("Technical Program Manager, Hardware\nSomewhere\n")
+    assert main(["resume-files", "--jd", str(jd)]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["role"] == "Technical Program Manager, Hardware"
+    assert [h["rule"] for h in payload["personalization_role_rules"]] == ["Lead with program work."]
+    assert [h["rule"] for h in payload["personalization_company_rules"]] == [
+        "When applying to Globex, add a bullet."
+    ]
+    # explicit flags win over what the JD file implies; without any of them the lists are not computed
+    assert main(["resume-files", "--jd", str(jd), "--role", "Data Engineer", "--company", "Nobody"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [h["rule"] for h in payload["personalization_role_rules"]] == ["Lead with SQL."]
+    assert payload["personalization_company_rules"] == []
+    assert main(["resume-files"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["role"] is None and payload["personalization_role_rules"] is None
+
+
+def test_resume_files_withholds_an_uncustomized_personalization_template(
+    tmp_path, monkeypatch, capsys
+):
+    _bare_project(tmp_path, monkeypatch)
+    directory = tmp_path / "config" / "resume"
+    directory.mkdir(parents=True)
+    (directory / "main_resume_2026-01-01.md").write_text("r")
+    (directory / "personalization.md").write_text("TEMPLATE-NOT-CUSTOMIZED: delete me\n## all\n- x\n")
+    assert main(["resume-files"]) == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["personalization"] is None
+    assert "TEMPLATE-NOT-CUSTOMIZED" in payload["personalization_warning"]
+    assert "TEMPLATE-NOT-CUSTOMIZED" in captured.err  # also visible to a human in the terminal
 
 
 def test_resume_files_exits_2_with_instructions_when_no_resume(tmp_path, monkeypatch, capsys):
@@ -701,3 +806,29 @@ def test_add_application_rejects_non_http_url_and_saved_with_date(tmp_path, monk
     assert main([*base, "--url", "javascript:alert(1)"]) == 2
     assert main([*base, "--url", "https://example.com", "--status", "saved", "--applied-at", "2026-10-01"]) == 2
     assert not (tmp_path / "data" / "applications.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("argv", "project", "command", "sub", "slow"),
+    [
+        (["collect", "status", "--project", "/x"], "/x", "collect", "status", None),
+        (["--project", "/y", "collect", "stop"], "/y", "collect", "stop", None),
+        (["collect", "--project", "/z", "start", "--slow"], "/z", "collect", "start", True),
+        (["snapshot", "--project", "/w"], "/w", "snapshot", None, None),
+        (["collect", "status"], None, "collect", "status", None),
+    ],
+)
+def test_collect_and_snapshot_accept_project_in_any_position(argv, project, command, sub, slow):
+    args = parser().parse_args(argv)
+    assert args.project == (Path(project) if project else None)
+    assert args.command == command
+    if command == "collect":
+        assert args.collect_command == sub
+    if slow:
+        assert args.slow is True
+
+
+def test_bare_collect_is_a_usage_error():
+    with pytest.raises(SystemExit) as exc:
+        parser().parse_args(["collect"])
+    assert exc.value.code == 2

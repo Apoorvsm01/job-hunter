@@ -80,6 +80,20 @@ def parser() -> argparse.ArgumentParser:
     search.add_argument("--debug", action="store_true")
     sub.add_parser("doctor")
     sub.add_parser("source-status")
+    collect = sub.add_parser("collect", help="run the collector in the background")
+    collect_sub = collect.add_subparsers(dest="collect_command", required=True)
+    collect_start = collect_sub.add_parser("start")
+    collect_start.add_argument("--companies", default=None)
+    collect_start.add_argument(
+        "--slow", action="store_true",
+        help="use settings collection.background (1 source at a time, delay between sources)",
+    )
+    collect_status = collect_sub.add_parser("status")
+    collect_status.add_argument("--json", action="store_true")
+    collect_sub.add_parser("stop")
+    for collect_parser in collect_sub.choices.values():
+        add_project_argument(collect_parser, suppress_default=True)
+    sub.add_parser("snapshot", help="build an archive from what the collector has stored so far")
     test = sub.add_parser("source-test")
     test.add_argument("company")
     sub.add_parser("db-stats")
@@ -121,6 +135,20 @@ def parser() -> argparse.ArgumentParser:
     export_jd_cmd.add_argument("job_id")
     resume_files = sub.add_parser("resume-files")
     resume_files.add_argument("--resume", type=Path, default=None)
+    resume_files.add_argument(
+        "--company", default=None,
+        help="employer name (the JD's output folder name works); also list the personalization rules that name it",
+    )
+    resume_files.add_argument(
+        "--role", default=None,
+        help="job title; also list the personalization rules whose [role: ...] tag matches it "
+        "(never pass text copied from a job description here: use --jd)",
+    )
+    resume_files.add_argument(
+        "--jd", type=Path, default=None,
+        help="a JD_*.txt export: the role is its first line and the company its data/output/<Company> folder "
+        "(--role/--company override); reads the file itself so no job text reaches a shell command line",
+    )
     sub.add_parser(
         "reevaluate-sponsorship",
         help=(
@@ -259,6 +287,27 @@ def parser() -> argparse.ArgumentParser:
         help="print a pipeline run's manifest — the newest run by default, or --run <id>",
     )
     status.add_argument("--run", help="a specific run_id (default: the newest run overall)")
+    why_missed = sub.add_parser(
+        "why-missed",
+        help="explain why a stored job was not in the radar, and suggest title terms that would admit it",
+    )
+    why_missed.add_argument(
+        "ref",
+        help="job id, source_key:job_id, a URL (matched by exact URL or ids in its path) or part of the title",
+    )
+    why_missed.add_argument("--search", type=Path, default=None, help="check this archive instead of the newest")
+    why_missed.add_argument("--keyword", default=None, help="evaluate against this keyword override, like `search --keyword`")
+    why_missed.add_argument("--json", action="store_true")
+    near_misses = sub.add_parser(
+        "near-misses",
+        help="report rejected jobs that look relevant from their description, plus vocabulary hints",
+    )
+    near_misses.add_argument("--min-terms", type=nonneg_int, default=3, help="distinct strong terms required (default 3)")
+    near_misses.add_argument("--limit", type=nonneg_int, default=None, help="cap rows (default 100 when listing everything)")
+    near_misses.add_argument("--all", action="store_true", help="list all, not only jobs first seen since the last scan")
+    near_misses.add_argument("--ignore-term", action="append", default=[], help="strong term to ignore (repeatable; added to the default generic set)")
+    near_misses.add_argument("--output-dir", type=Path, default=None, help="where to write the report (default data/near-miss/)")
+    near_misses.add_argument("--no-state", action="store_true", help="do not advance the last-scan marker")
     # --project is registered on the root parser above so `job-hunter --project X <command>`
     # works, but argparse subparsers only see arguments that appear *after* the command token —
     # `job-hunter <command> --project X` would otherwise be rejected as unrecognized. Registering
@@ -360,7 +409,7 @@ async def _source_test(key: str) -> int:
 
 def _stealth_browser_check(companies: list | None) -> tuple[str, bool, str]:
     """Only actually a check when a configured, enabled company needs it — the stealth
-    headless browser is an opt-in dependency (`--extra stealth`), not a default one, so
+    headless browser is an opt-in dependency (`--all-extras`), not a default one, so
     its absence is only a real failure for a source that would actually invoke it.
     A pure function of (companies, whether scrapling is importable) so `doctor()`'s
     control flow around config-loading failures stays simple and this stays unit-testable
@@ -381,7 +430,7 @@ def _stealth_browser_check(companies: list | None) -> tuple[str, bool, str]:
         f"required by: {', '.join(stealth_companies)}"
         if installed
         else f"required by: {', '.join(stealth_companies)}, but the 'stealth' dependency "
-        "group is not installed (uv sync --extra stealth && uv run scrapling install)"
+        "extra is not installed (uv sync --all-extras && uv run scrapling install)"
     )
     return "stealth browser", installed, detail
 
@@ -507,6 +556,22 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "doctor":
             return doctor()
         settings = load_settings()
+        if args.command == "collect":
+            from .background import cli_collect
+
+            return cli_collect(args)
+        if args.command == "snapshot":
+            from .background import cli_snapshot
+
+            return cli_snapshot()
+        if args.command == "why-missed":
+            from .why_missed import cli_why_missed
+
+            return cli_why_missed(args, settings)
+        if args.command == "near-misses":
+            from .near_miss import cli_near_misses
+
+            return cli_near_misses(args, settings)
         if args.command == "export-applications":
             with Storage(settings.database_path) as storage:
                 rows = storage.export_applications()
@@ -571,10 +636,35 @@ def main(argv: list[str] | None = None) -> int:
             def _s(path: Path | None) -> str | None:
                 return str(path) if path else None
 
+            personalization, personalization_warning = resume_source.personalization_status(root)
+            if personalization_warning:
+                print(f"job-hunter: {personalization_warning}", file=sys.stderr)
+            company = args.company
+            role = args.role
+            if args.jd is not None:
+                company = company if company is not None else resume_source.jd_company(args.jd)
+                role = role if role is not None else resume_source.jd_title(args.jd)
+            problems: list[str] = []
+            company_hits: list[dict[str, str]] | None = None
+            role_hits: list[dict[str, object]] | None = None
+            if personalization is not None:
+                body = personalization.read_text(encoding="utf-8", errors="replace")
+                problems = resume_source.personalization_problems(body)
+                for problem in problems:
+                    print(f"job-hunter: personalization.md: {problem}", file=sys.stderr)
+                if company is not None:
+                    company_hits = resume_source.company_rules(body, company)
+                if role is not None:
+                    role_hits = resume_source.role_rules(body, role)
             print(_json({
                 "master_resume": str(resolved.path),
                 "master_resume_source": resolved.source,
-                "personalization": _s(resume_source.find_personalization(root)),
+                "personalization": _s(personalization),
+                "personalization_warning": personalization_warning,
+                "personalization_problems": problems,
+                "personalization_company_rules": company_hits,
+                "role": role,
+                "personalization_role_rules": role_hits,
                 "cover_letter_sample": _s(resume_source.find_cover_sample(root)),
                 "review_evidence": _s(resume_source.find_review_evidence(root)),
             }))

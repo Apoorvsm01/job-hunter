@@ -1,6 +1,6 @@
 ---
 name: job-radar
-version: 1.5.0
+version: 1.6.2
 description: Compile job-hunter's scored candidates into a two-tier report (text summary and/or HTML radar page) — reflects review progress so far, safe to re-run at any time including mid-review.
 compatibility: Requires uv and Python 3.11+. No LM Studio dependency — pure presentation over already-recorded assessments, no scoring happens here.
 metadata:
@@ -23,12 +23,12 @@ see step 6's stale-source fallback note below.
 
 ## Examples
 
-- `/job-radar --keyword ADAS` — render/update the report for that keyword, any time (including
+- `/job-radar --keyword Analytics` — render/update the report for that keyword, any time (including
   mid-review — always reflects exactly what's been reviewed so far)
 - `/job-radar --search data/searches/adas_2026-08-20.json` — render one specific historical
   archive by exact path, bypassing keyword resolution
 - `/job-radar` — cold start, resolves to the newest archive of any keyword
-- `/job-radar --keyword ADAS --refilter` — you just edited `candidate_profile.yaml` (e.g. added a
+- `/job-radar --keyword Analytics --refilter` — you just edited `candidate_profile.yaml` (e.g. added a
   `soft_exclude_terms` entry from `suggest_exclusions.py`) and want the report to reflect it
   against jobs already collected today, with no new search/scraper call
 
@@ -40,7 +40,7 @@ Input:
 - optional `--refilter` mode (via `job-hunter pipeline --no-scrape`, not a `render_radar.py` flag
   itself — see step 3) when the profile changed and the existing archive needs re-evaluating first
 - optional `--new-days`/`--undated-new-days`/`--undated-stale-days` (tag-window tuning) and
-  `--no-collection-fallback` (disable the failed-source stale-job merge)
+  `--no-collection-fallback` (disable the stale-job merge for failed or early-stopped sources)
 
 Output:
 - an HTML report at `data/radar/{slug}_{date}.html` (printed as `Wrote <path> | strong=N
@@ -48,7 +48,10 @@ Output:
 - a chat-facing text summary compiled from the same data: Strong (score ≥ 75) and For-review
   (50–74) sections, `[90+]`/`[80+]`/`[New]` tags, and a below-50 excluded count
 - a leading Collection Issues note for any non-`ok` source (failed/warning/unsupported), including
-  the stale-source fallback sentence when a failed source's last-known-good jobs were merged in
+  the stale-source fallback sentence when a failed source's last-known-good jobs were merged in.
+  A source that stopped early (rate limited, timed out or errored mid-listing) keeps the jobs it had
+  already fetched, with a "Rate limited"/"Timed out" badge when the cause is known, and the
+  `--result-json` lists it under `rate_limited_sources` (which makes a pipeline run's status `partial`)
 - next command: none required to see results — this is the final presentation stage; `job-feedback`
   is the follow-up once the user has reviewed the report and wants to tag/adjust the profile
 
@@ -67,7 +70,7 @@ Output:
    "re-filter", "without invoking the scraper", or similar — use the pipeline orchestrator's
    dedicated mode rather than chaining scripts by hand:
    ```bash
-   uv run job-hunter pipeline --project "$CLAUDE_PROJECT_DIR" --no-scrape [--keyword "ADAS,Robotics"]
+   uv run job-hunter pipeline --project "$CLAUDE_PROJECT_DIR" --no-scrape [--keyword "Analytics,Data Engineer"]
    ```
    This makes no network/adapter calls at all — it re-runs `scripts/refilter_archive.py` (rebuilds
    `candidates` from SQLite's current active/US-eligible job pool, scoped to that archive's own
@@ -102,7 +105,7 @@ Output:
    never invent either for a posting that doesn't mention it.
 6. Render the standalone HTML report:
    ```bash
-   uv run python scripts/render_radar.py --project "$CLAUDE_PROJECT_DIR" [--keyword "ADAS,Robotics,Product Technical Leader"]
+   uv run python scripts/render_radar.py --project "$CLAUDE_PROJECT_DIR" [--keyword "Analytics,Data Engineer,Product Manager"]
    ```
    It prints `Wrote <path> | strong=N review=N below_50=N never_reviewed=N source_issues=N
    (failed=N)`; sanity-check those counts against what you just compiled. The HTML report itself
@@ -119,7 +122,7 @@ Output:
 
    **Live option:** for interactive triage, `uv run python scripts/serve_radar.py --project "$CLAUDE_PROJECT_DIR" --open` serves the same report with click-to-save feedback, extra filters, and change polling. It is opt-in, loopback-only by default, and never writes `data/radar/`; the static report remains the deliverable. The live report also tracks applications (Track chip, `/applications` page; `job-hunter export-applications` rewrites `data/applications.json`/`.csv`). Each live row also has a **Resume** button: it saves that job's description under `data/output/<Company>/` and copies a prompt for the `resume-generator` skill (then `outreach-writer`).
 
-   A `failed` source's row can also carry a second sentence: the stale-source-collection fallback
+   A `failed` source's row (or a warning that stopped early after an error, rate limit or timeout) can also carry a second sentence: the stale-source-collection fallback
    (`docs/pipeline-refilter-stale-source-plan.md` section 4.3). Rather than showing zero jobs for
    a source that failed to scrape *this* run, the report merges in that source's last active,
    still-recency-passing jobs straight from SQLite (the archive file on disk is never rewritten by

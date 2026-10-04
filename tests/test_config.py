@@ -3,16 +3,24 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from job_hunter.config import RetentionConfig, SearchConfig, load_companies, load_settings
+from job_hunter.config import (
+    CandidateProfile,
+    RadarConfig,
+    RetentionConfig,
+    SearchConfig,
+    VisionConfig,
+    load_companies,
+    load_settings,
+)
 
 
 def test_project_configs_validate():
     root = Path(__file__).parents[1]
-    settings = load_settings(root / "config/settings.yaml")
+    settings = load_settings(root / "config/settings.example.yaml")
     assert settings.version == 1
     companies = load_companies(root / "config/companies.yaml")
-    assert len(companies) == 82 and len({item.key for item in companies}) == 82
-    # config/settings.yaml's own committed retention: values, not just the model defaults.
+    assert len(companies) == 85 and len({item.key for item in companies}) == 85
+    # config/settings.example.yaml's own committed retention: values, not just the model defaults.
     assert settings.retention.closed_job_after_days == 10
     assert settings.retention.report_after_days == 15
     assert settings.retention.keep_latest_reports_per_slug == 2
@@ -53,3 +61,37 @@ def test_retention_config_rejects_invalid_values():
         RetentionConfig(report_after_days=0)
     with pytest.raises(ValidationError):
         RetentionConfig(keep_latest_reports_per_slug=-1)
+
+
+def test_shipped_settings_keep_the_default_page_theme():
+    root = Path(__file__).parents[1]
+    assert load_settings(root / "config/settings.example.yaml").radar.theme == "auto"
+
+
+def test_radar_config_theme_values():
+    assert RadarConfig().theme == "auto"
+    assert RadarConfig(theme="forest").theme == "forest"
+    assert RadarConfig(theme="forest-dawn").theme == "forest-dawn"
+    with pytest.raises(ValidationError):
+        RadarConfig(theme="sunset")
+
+
+def test_vision_config_defaults_and_overrides():
+    vision = VisionConfig()
+    assert vision.role == "Your next role"
+    assert vision.pay_note == "Better. Higher paying."
+    assert vision.start_note == "Start date: soon"
+    assert vision.use_first_name is True
+    custom = VisionConfig(role="Staff Perception Engineer", use_first_name=False)
+    assert custom.role == "Staff Perception Engineer" and custom.use_first_name is False
+
+
+def test_vision_config_rejects_empty_and_overlong_text():
+    with pytest.raises(ValidationError):
+        VisionConfig(role="")
+    with pytest.raises(ValidationError):
+        VisionConfig(pay_note="x" * 61)
+
+
+def test_candidate_profile_has_a_default_vision():
+    assert CandidateProfile().vision == VisionConfig()

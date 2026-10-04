@@ -7,6 +7,13 @@ import yaml
 from pydantic import BaseModel, Field, model_validator
 
 
+class BackgroundConfig(BaseModel):
+    """`job-hunter collect start --slow`: a gentler pace for long background collections."""
+
+    max_concurrent_sources: int = Field(1, ge=1, le=20)
+    source_delay_seconds: float = Field(30.0, ge=0)
+
+
 class CollectionConfig(BaseModel):
     max_concurrent_sources: int = Field(3, ge=1, le=20)
     max_concurrent_details: int = Field(8, ge=1, le=50)
@@ -15,6 +22,11 @@ class CollectionConfig(BaseModel):
     timeout_seconds: float = Field(30, gt=0)
     max_retries: int = Field(3, ge=0, le=10)
     user_agent: str = "JobHunter/0.1 (+manual career search)"
+    # Wall-clock bound on one source's *listing* phase (fetch_summaries); on expiry the jobs
+    # the adapter had already registered are kept. None disables. Detail fetches are already
+    # per-job fail-soft and are not bounded by this.
+    source_timeout_seconds: float | None = Field(1200, gt=0)
+    background: BackgroundConfig = BackgroundConfig()
 
 
 class SearchConfig(BaseModel):
@@ -85,6 +97,13 @@ class PipelineConfig(BaseModel):
     )
 
 
+class RadarConfig(BaseModel):
+    """Look of the generated HTML pages. `auto` is the plain light/dark page; the forest themes
+    are opt-in (docs/superpowers/specs/2026-10-03-forest-offer-theme-design.md)."""
+
+    theme: Literal["auto", "forest", "forest-dawn"] = "auto"
+
+
 class Settings(BaseModel):
     version: int = 1
     database_path: Path = Path("data/jobs.sqlite3")
@@ -94,6 +113,7 @@ class Settings(BaseModel):
     logging: LoggingConfig = LoggingConfig()
     retention: RetentionConfig = RetentionConfig()
     pipeline: PipelineConfig = PipelineConfig()
+    radar: RadarConfig = RadarConfig()
 
 
 class CompanyConfig(BaseModel):
@@ -169,6 +189,16 @@ def contact_problems(contact: ContactInfo) -> list[str]:
     return problems
 
 
+class VisionConfig(BaseModel):
+    """Display text for the forest themes' "Offer Season" layer. Never a filter or a score input.
+    `use_first_name: false` keeps the applicant's name out of the generated pages."""
+
+    role: str = Field("Your next role", min_length=1, max_length=60)
+    pay_note: str = Field("Better. Higher paying.", min_length=1, max_length=60)
+    start_note: str = Field("Start date: soon", min_length=1, max_length=60)
+    use_first_name: bool = True
+
+
 class CandidateProfile(BaseModel):
     profile_version: int = 1
     resume_path: Path | None = None
@@ -181,6 +211,7 @@ class CandidateProfile(BaseModel):
     minimum_recommendation_score: int = Field(75, ge=0, le=100)
     location: dict[str, Any] = Field(default_factory=dict)
     contact: ContactInfo = Field(default_factory=ContactInfo)
+    vision: VisionConfig = Field(default_factory=VisionConfig)
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -193,6 +224,10 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 
 
 def load_settings(path: Path = Path("config/settings.yaml")) -> Settings:
+    if not path.exists():
+        # config/settings.yaml is git-ignored (local choices such as radar.theme); a fresh clone
+        # runs on the committed example, same fallback as load_profile.
+        path = path.with_name("settings.example.yaml")
     return Settings.model_validate(_load_yaml(path))
 
 

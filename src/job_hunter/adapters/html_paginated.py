@@ -14,10 +14,17 @@ from ..normalizer import (
     parse_flexible_date,
     stringify,
 )
-from .base import JobAdapter, SchemaError
+from .base import AdapterError, JobAdapter, SchemaError
 
 
 class HtmlPaginatedAdapter(JobAdapter):
+    # Opt-in (StealthHtmlAdapter): a source behind a bot-management wall can return a blank or
+    # challenge page instead of an error, and the generic "empty page after some jobs is the end
+    # of pagination" rule below would then report a truncated listing as complete — letting
+    # `mark_missing` age out every job the run never reached. When True, an empty page the loop
+    # itself asked for, or running out of `max_pages` with more pages promised, raises instead.
+    strict_pagination = False
+
     async def fetch_summaries(self, start_url: str | None = None) -> list[JobSummary]:
         """`start_url` overrides `config["list_url"]` for this call only — used by
         `HtmlMultiIndexAdapter` to fetch several independent listing indexes without
@@ -28,16 +35,26 @@ class HtmlPaginatedAdapter(JobAdapter):
         start_url = start_url or cfg.get("list_url")
         if not start_url:
             raise SchemaError("list_url is not configured")
-        jobs: list[JobSummary] = []
+        jobs = self.begin_listing()
         seen_urls: set[str] = set()
         url: str | None = start_url
         for page in range(int(cfg.get("max_pages", 20))):
             if not url or url in seen_urls:
+                if self.strict_pagination and url:
+                    raise AdapterError(f"pagination loop: {url} was already fetched")
                 break
             seen_urls.add(url)
             response = await self.request("GET", url)
             tree = HTMLParser(response.text)
             cards = tree.css(cfg.get("card_selector", "[data-job-id]"))
+            # Opt-in: some sites (Harman's Avature) answer the page *after* the last one with
+            # a "No jobs found" placeholder inside the same card element, so a catalog that is
+            # an exact multiple of page_size would otherwise read as a job card with no link.
+            # A placeholder is not a job card: dropping it lets the empty-page rule below decide
+            # (end of listing once jobs exist, a loud SchemaError if it is the very first page).
+            empty_text = str(cfg.get("empty_page_text") or "").lower()
+            if empty_text:
+                cards = [c for c in cards if empty_text not in normalize_text(c.text()).lower()]
             if not cards:
                 # No cards on this page — if we already have jobs, this is
                 # graceful end-of-pagination (WAF timeout, last page, etc.).
@@ -45,6 +62,11 @@ class HtmlPaginatedAdapter(JobAdapter):
                 # first page had no cards — real config error).
                 if not jobs:
                     raise SchemaError("no job cards matched configured selector")
+                if self.strict_pagination:
+                    raise AdapterError(
+                        f"page returned no job cards after {len(jobs)} job(s) were already "
+                        f"collected; not treating it as the end of the listing: {url}"
+                    )
                 break
             for card in cards:
                 # link_selector: "self" is opt-in for sites (e.g. Wayve's "First" ATS)
@@ -112,6 +134,11 @@ class HtmlPaginatedAdapter(JobAdapter):
                 url = _page_url(start_url, cfg["page_number_parameter"], page + 2)
             else:
                 url = None
+        if self.strict_pagination and url and url not in seen_urls:
+            raise AdapterError(
+                f"stopped at max_pages={int(cfg.get('max_pages', 20))} with more pages available "
+                f"after {len(jobs)} job(s); raise max_pages rather than truncate the listing"
+            )
         return jobs
 
     async def fetch_detail(self, summary: JobSummary) -> JobDetail:

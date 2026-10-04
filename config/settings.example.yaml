@@ -1,3 +1,6 @@
+# Copy to config/settings.yaml and edit (config/settings.yaml is git-ignored, so your local
+# choices -- e.g. radar.theme -- stay out of the repo). With no settings.yaml, job-hunter
+# falls back to this file. Nothing here is personal data.
 version: 1
 database_path: data/jobs.sqlite3
 collection:
@@ -7,6 +10,14 @@ collection:
   max_keepalive_connections: 12
   timeout_seconds: 30
   max_retries: 3
+  # Wall-clock limit (seconds) on one source's listing phase. When it expires, the jobs the
+  # adapter had already fetched are kept (reported as a "Timed out" warning) and the run
+  # moves on. Set `null` to disable (removing the line falls back to the default, 1200).
+  source_timeout_seconds: 1200
+  # `job-hunter collect start --slow` pace (background collection):
+  # background:
+  #   max_concurrent_sources: 1
+  #   source_delay_seconds: 30
 search:
   country: US
   include_work_arrangements: [onsite, hybrid, remote, unknown]
@@ -36,4 +47,12 @@ retention:
 # longer than that.
 pipeline:
   stage_timeout_seconds: 28800  # 8 hours
+# Look of the generated radar / applications pages
+# (docs/superpowers/specs/2026-10-03-forest-offer-theme-design.md).
+#   auto        the plain light/dark page (default)
+#   forest      night forest
+#   forest-dawn sunrise
+# `scripts/render_radar.py --theme ...` overrides this for a single run.
+radar:
+  theme: auto
 

@@ -14,7 +14,10 @@ Collection is config-driven HTTP/HTML fetching, with one exception: `stealth_htm
 sources with no plain anonymous endpoint — either bot-blocked (`astemo`: Cloudflare Turnstile) or
 JS-rendered content (`google`). Using it is a disclosed choice to defeat anti-automation controls
 (real ToS exposure, not solved by "it's public data") — don't reach for it by default; every other
-adapter stays plain httpx. See `docs/SPEC.md` §5.8.
+adapter stays plain httpx. See `docs/SPEC.md` §5.8. A blocked/challenged page there must never read
+as the end of a listing: `request()` raises (never returns empty HTML) and `strict_pagination` makes
+an empty continuation page or an exhausted `max_pages` raise, so a partial run is a `warning` that
+keeps its jobs and closes none (it used to be reported `ok` and `mark_missing` aged out the rest).
 
 **Before reaching for `stealth_html`, always check for a real backend behind a blocked/skinned
 front end** — a real job link, not a guess, is what reveals it:
@@ -55,14 +58,22 @@ scoring into Python or retrieval into the skill.
 ## Commands
 
 ```bash
-uv sync --dev                          # install runtime + dev deps
+uv sync --all-extras                   # runtime + dev + `stealth` extra, in ONE command
+uv run playwright install chromium     # once: resume/cover-letter PDFs
+uv run scrapling install               # once: only for stealth_html sources
 uv run job-hunter doctor               # environment/config sanity check
 uv run job-hunter search                # run all enabled sources
 uv run job-hunter search --json --output data/latest_search.json
 uv run job-hunter search --companies honda,toyota --new-only
+uv run job-hunter collect start --slow          # background collection (state: data/collect/state.json)
+uv run job-hunter collect status [--json]
+uv run job-hunter collect stop                  # cooperative: in-flight sources finish
+uv run job-hunter snapshot                      # archive from what's stored so far; then: pipeline --no-scrape --search <path>
 uv run job-hunter source-status         # per-source health from SQLite
 uv run job-hunter source-test honda     # healthcheck one adapter live
 uv run job-hunter db-stats
+uv run job-hunter why-missed ford:71202     # why wasn't this job in the radar? stage-by-stage, plus title terms that would admit it
+uv run job-hunter near-misses               # report rejected jobs that look relevant from their description + vocabulary hints
 uv run job-hunter export --format json
 uv run python scripts/check_lm_studio.py  # is the configured LM Studio server actually reachable right now?
 
@@ -72,9 +83,14 @@ uv run pytest -m "not live"             # skip tests marked live (network-depend
 uv run ruff check .
 ```
 
-Tests use saved response fixtures in `tests/fixtures/` and never hit the network unless marked
+`playwright`/`pypdf` are base dependencies; `stealth` is the only extra (opt-in, ToS exposure). `uv sync`
+makes the venv match exactly what's requested, so a bare `uv sync` or a single `--extra X` **removes**
+the other extras — always sync with `--all-extras`. Browser binaries live in a shared cache and survive
+syncs. Tests use saved response fixtures in `tests/fixtures/` and never hit the network unless marked
 `live`. Setup requires `cp config/candidate_profile.example.yaml config/candidate_profile.yaml`
 before most commands will find a profile (falls back to the example file otherwise).
+`config/settings.yaml` is git-ignored (local choices such as `radar.theme`); the committed template is
+`config/settings.example.yaml`, which `load_settings()` falls back to when the local file is absent.
 
 ## Architecture
 
@@ -97,7 +113,9 @@ ranked `SearchResult` JSON.
   `adapters/__init__.py`'s `ADAPTERS` dict, selected via `companies.yaml`'s `adapter` key. All
   inherit `JobAdapter` (`adapters/base.py`): retry-with-backoff `request()` (429/500/502/503/504 +
   network/timeout, honors `Retry-After`), default `healthcheck()`. Adapters implement
-  `fetch_summaries()` (required), optional `fetch_detail()`.
+  `fetch_summaries()` (required), optional `fetch_detail()`. A terminal 429/WAF raises
+  `RateLimitError` (`http_status`, `retry_after_seconds`); paginating adapters register their
+  accumulator with `begin_listing()` (or `keep(batch)` per page) so a rate limit keeps earlier pages.
 
   `json_api.py`'s `ConfigurableJsonAdapter` is a generic JSON-listing kernel driven by
   `companies.yaml` config (`list_url`, `items_path`, `fields`); several adapters are thin
@@ -138,6 +156,12 @@ ranked `SearchResult` JSON.
   sorted, so it always fetches the full catalog. `storage.mark_missing(stale_before=...)` prevents
   early-pagination-stop from falsely closing jobs it simply stopped looking for. See
   `docs/SPEC.md` §12.
+
+  On any listing failure (`RateLimitError` from a terminal 429/WAF, a timeout, or another
+  exception) it keeps `adapter.kept` and records a `warning` `SourceHealth` with `failure_kind`
+  (`rate_limited`/`timeout`), `http_status`, `retry_after_seconds` — no `mark_missing`, count
+  baseline not advanced; `failed` only when nothing was kept. `collection.source_timeout_seconds`
+  (default 1200, `None` disables) bounds the listing phase only.
 
 - **`location.py`** — `evaluate_location` → `LocationDecision` (`us_eligible`, `confidence`,
   `evidence`). Precedence: structured country/state fields → "remote in the U.S." phrasing → U.S.
@@ -204,6 +228,18 @@ ranked `SearchResult` JSON.
   verdict pattern. `passes_prefilter` is a thin `.passes` wrapper for existing callers.
   Short-circuit evaluation: `rule`/`term` name the *decisive* check only, not every failing check.
 
+- **`src/job_hunter/why_missed.py`** (+ `vocabulary.py`, `active_pool.find_jobs`) — deterministic, read-only
+  explanation of a stored job's journey (collected, eligible, recent, prefilter, archive), with title-term suggestions
+  whose gain is computed by the real `evaluate_prefilter` on a widened profile copy; never edits the profile. Lesson:
+  positive matching is a substring test on title+department, so `vehicle test` does not match "Vehicle Calibration &
+  Test", and 61% of eligible jobs have no department, so the title is often the only signal.
+
+- **`src/job_hunter/near_miss.py`** — periodic human-only report of `no_positive_match` rejects whose
+  boilerplate-stripped descriptions carry >= 3 distinct strong terms, with vocabulary hints and a department-coverage
+  table; reads SQLite read-only (`raw_active_jobs(..., readonly=True)`); state (`last_scan_at`) in
+  `data/near-miss/state.json`, and rows dropped by the 100-row first-run cap or `--limit` are counted in the report;
+  never scored, merged or added to `candidates`.
+
 - **`scripts/diff_profile.py`** — compares two `CandidateProfile`s (two saved YAMLs, or the
   on-disk profile + an in-memory `--add`/`--remove` patch never written back) against every stored
   `us_eligible`/recency-passing job via `evaluate_prefilter` directly. Reports four counts
@@ -230,6 +266,23 @@ ranked `SearchResult` JSON.
   for that one. See `skills/job-feedback/SKILL.md`.
 
 - **`scripts/serve_radar.py`** — opt-in localhost live radar: GET `/`, `/applications`, `/api/state`, `/api/feedback`, `/api/applications`; POST `/api/feedback`, `/api/application`, `/api/jd`, `/api/shutdown` (loopback-bind only, replies then stops via a short-lived thread; the radar page's Stop server button) (application snapshot fields derived server-side; every UI edit sends the full record; `applied_at` can't be cleared; unknown job → 404; 15 s handler timeout; feedback untag is idempotent). Loopback by default, unauthenticated. Opens a per-request `Storage`, holds `run_lock("radar-server")`, validates writes against `jobs` (the label is client-supplied and validated; company/title/department/score are derived server-side from the `jobs`/`assessments` tables), never renders on the write path, never writes `data/radar/`; `--project` supported. Live saves don't refresh `data/job_feedback.json`/`.csv`, but each committed application write refreshes `data/applications.json`/`.csv` (`applications_export.py`'s `write_applications_exports`; CSV formula guard prefixes `'` on cells starting `= + - @` tab/CR); a refresh failure surfaces as `export_warning` and never fails or reverts the save. `scripts/render_applications.py` renders `/applications`; `scripts/templates/radar_live_sync.js` is the shared node-tested outbox engine (`tests/js/`) used by both live pages. The unsent-writes outbox is one shared localStorage key (`job-hunter-outbox`); with the server down and two tabs open, an unsent edit in one tab can overwrite the other tab's stored entry (each tab still retries its own from memory; the event-time rule makes duplicate sends harmless).
+- **`src/job_hunter/theme.py`** (+ `scripts/templates/themes/`) — opt-in `forest`/`forest-dawn` page
+  themes chosen by `settings.radar.theme` (`render_radar.py --theme` overrides). Pure resolver: `auto`
+  returns empty strings so default pages stay byte-identical (the radar and Applications goldens
+  guard this). CSS rides on existing token values (`__LIVE_STYLE__`/`__LIVE_SCRIPT__`, plus
+  `__THEME_CSS__` on the Applications template) because tokens are substituted in one regex pass —
+  adjacent tokens would mis-tokenise. Theme CSS uses `:root:root:root` to beat the page's dark-mode
+  block. The first name is the first whitespace token of `contact.name` that is not an honorific
+  (`display_first_name`), dropped for placeholders or
+  `vision.use_first_name: false`; all dynamic text is written with `textContent`. Live pages dispatch
+  `jobhunter:application-status` only for a save that *newly* reaches `offer`.
+  The vision card is an email-style notification (`.mf-offer.mf-mail`); `announce()` slides a mail
+  banner in before the celebration, and `syncGap()` reserves space so the expanded card never covers
+  the stats block.
+  On the Applications page `applications.css`/`applications.js` (loaded by `load_applications_assets`,
+  appended only for forest themes) add a display-only "inbox" layer (badges, offer ribbon, Compare
+  button, themed heading/chips); it listens for `jobhunter:offer-mode` and the goldens are unaffected.
+  Under `forest-dawn` the sky follows progress: `applications.js` sets `--mf-rise` (0.1 with no stage row, else furthest of saved/applied/interviewing/offer / 4) and the CSS lifts the sun and fades a `.mf-dusk` overlay.
 
 - **`scripts/refilter_archive.py`** — answers "what would this already-collected archive's
   candidates look like under the *current* profile," no network. Rebuilds `candidates` from
@@ -287,13 +340,27 @@ ranked `SearchResult` JSON.
   stuck `running` forever — regression-tested). `RunLockHeld` → its own `lock_held` status, not
   generic `failed`.
 
+- **`src/job_hunter/background.py`** — `job-hunter collect start|status|stop` and `snapshot`: a
+  detached `python -m job_hunter.background` process runs `Collector.search()` while filtering/
+  review/render keep working against SQLite. Holds only `run_lock("collector")`, never the shared
+  `"job-hunter"` lock; writes `data/collect/state.json` atomically after every source event and
+  never writes an archive mid-run (on completion, not stop, it writes the normal
+  `archive_path(None, ...)` archive under the shared lock, falling back to a `collect-final` name if the lock is busy). `collect stop` is cooperative (SIGTERM: in-flight sources
+  finish, unstarted ones skipped, status `stopped`, no archive); a `running` state with a dead PID
+  reads as `abandoned` and doesn't block a new start. `snapshot` writes a minimal archive of only
+  finished sources to its own `data/searches/collect-snapshot_<date>.json` (not the default
+  archive's name — can't clobber a same-day foreground archive), holding the shared lock only for
+  that write, then runs `refilter_archive.py --no-report` on it and prints
+  `pipeline --no-scrape --search <path>`. `cleanup --apply` refuses while the collector lock is
+  held. `--slow` uses `settings.collection.background`. No scheduling, by design.
+
 - **`src/job_hunter/rootutil.py`, `atomic.py`, `runlock.py`** — portability infra. `atomic.py`/
   `runlock.py` are universal (every load-bearing writer/lock-holder uses them, hooks included).
   `rootutil.py`'s `--project`/`add_project_argument()` is used by the CLI and every *operational*
   `scripts/*.py` entry point (`apply_radar_feedback.py`, `assessments_to_csv.py`,
   `check_lm_studio.py`, `diff_profile.py`, `log_resume.py`, `measure_resume.py`, `refilter_archive.py`, `render_radar.py`,
   `review_with_lm_studio.py`, `suggest_exclusions.py`); not `endpoint_probe.py`/
-  `prototype_tfidf_broad_match.py`/`search_to_csv.py` (diagnostic/prototype/pure-stdio), and hook
+  `prototype_tfidf_broad_match.py`/`search_to_csv.py`/`render_applications.py`/`test_tesla.py` (diagnostic/prototype/pure-stdio), and hook
   scripts take the project root positionally per their own runtime convention instead. Authoritative
   list: `grep -L add_project_argument scripts/*.py` (`docs/SPEC.md`).
 
@@ -313,34 +380,28 @@ ranked `SearchResult` JSON.
   between `O_CREAT|O_EXCL` and its write — a reader landing there used to misread this as abandoned
   and wrongly reclaim a live lock).
 
-  Because `pipeline.py` holds this lock for the whole run before spawning
-  `review_with_lm_studio.py`/`refilter_archive.py`, which each also try to acquire the identically-
-  named lock, they'd deadlock against their own parent. Fixed via `run_lock_or_inherited()`:
-  `pipeline.py` generates a per-acquisition token (`secrets.token_hex(16)`, written into the lock
-  file) and passes it via `JOB_HUNTER_LOCK_INHERITED`; the function only treats the lock as
-  inherited when that env var matches `current_lock_token()`'s live read, falling back to a real
-  acquire on any mismatch/missing file/unset var (fails closed) — a bare boolean flag was rejected
-  since any standalone caller could set the env var and skip the lock with no verification.
+  Because `pipeline.py` holds this lock for the whole run before spawning `review_with_lm_studio.py`/
+  `refilter_archive.py` (which take the same-named lock), they'd deadlock against their parent.
+  `run_lock_or_inherited()` fixes that: `pipeline.py` writes a per-acquisition token
+  (`secrets.token_hex(16)`) into the lock file and passes it via `JOB_HUNTER_LOCK_INHERITED`; a child
+  treats the lock as inherited only if that matches `current_lock_token()`'s live read, otherwise it
+  really acquires (fails closed). A bare boolean flag was rejected: any standalone caller could set it
+  and skip the lock unverified.
 
 - **`src/job_hunter/hook_adapter.py`** — shared logic behind the Claude Code
-  (`scripts/claude_profile_hook.py`) and Hermes (`scripts/hermes_profile_hook.py`) profile-diff
-  hooks: `should_run_diff()` (does an edited path resolve to this project's
-  `candidate_profile.yaml`) and `run_diff()` (runs `diff_profile.py` check mode). Each runtime
-  script owns only its stdin wire shape (Claude's `PostToolUse`: `tool_input.file_path`; Hermes's
-  `post_tool_call`: `tool_input.path`) and calls these — directly unit-testable, no subprocess/
-  stdin faking needed. `run_diff()` discovers `uv` via `shutil.which` and logs every failure mode
-  to `logs/profile-hook.log` (vs. the previous Hermes-only hook's silent
-  `contextlib.suppress`) — a silently-failing hook is worse than an advisory one. Guards against
-  overlapping runs: a non-blocking `run_lock("profile-hook", ...)` skips if another hook invocation
-  for the project is mid-run, plus a 5s debounce marker file (`logs/.profile-hook-last-run`) — both
-  logged, never silent. `HOOK_LOCK_NAME` (`"profile-hook"`) is its own lock, separate from
-  `runlock.py`'s `"job-hunter"` pipeline lock, since this hook only reads SQLite and rewrites the
-  profile-diff snapshot/report. `.claude/settings.json`'s `PostToolUse` invokes
-  `scripts/run_profile_hook.sh` (portable POSIX-`sh`) rather than a bare `uv run python ...` — the
-  direct form failed at the shell level if `uv` wasn't on the *invoking* process's `PATH`, before
-  `hook_adapter.py`'s own `shutil.which("uv")` check (which diagnoses the *inner* call) ever ran;
-  the launcher locates `uv` itself, falls back to `python3` with a stderr note, and always exits 0
-  (advisory by design).
+  (`scripts/claude_profile_hook.py`) and Hermes (`scripts/hermes_profile_hook.py`) profile-diff hooks:
+  `should_run_diff()` (does an edited path resolve to this project's `candidate_profile.yaml`) and
+  `run_diff()` (runs `diff_profile.py` check mode). Each runtime script owns only its stdin wire shape
+  (Claude's `PostToolUse`: `tool_input.file_path`; Hermes's `post_tool_call`: `tool_input.path`), so the
+  logic is unit-testable without subprocess/stdin faking. `run_diff()` finds `uv` via `shutil.which`,
+  logs every failure to `logs/profile-hook.log` (a silently-failing hook is worse than an advisory one),
+  and guards overlap with a non-blocking `run_lock("profile-hook", ...)` plus a 5s debounce marker
+  (`logs/.profile-hook-last-run`), both logged. `HOOK_LOCK_NAME` is separate from the `"job-hunter"`
+  pipeline lock: the hook only reads SQLite and rewrites the profile-diff snapshot/report.
+  `.claude/settings.json`'s `PostToolUse` runs `scripts/run_profile_hook.sh` (portable POSIX `sh`), not a
+  bare `uv run python ...` — the direct form failed at the shell level when `uv` wasn't on the invoking
+  process's `PATH`, before `hook_adapter.py`'s own check could run. The launcher locates `uv`, falls back
+  to `python3` with a stderr note, and always exits 0 (advisory by design).
 
 - **`storage.py`** — SQLite (WAL). Five core tables (plus `feedback_tombstones`, `applications`, `application_tombstones`): `jobs` (one row per `(source_key, job_id)`,
   upserted with `is_new`/`is_changed` from content hash), `runs` (per search invocation),
@@ -400,14 +461,38 @@ ranked `SearchResult` JSON.
   changed description -> numbered `_2` file). `POST /api/jd` in `serve_radar.py` (source_key/job_id only;
   200/404/409; project-relative path only) backs the live radar's per-row Resume button, which copies
   `Use the resume-generator skill on <path>`. `scripts/measure_resume.py`/`log_resume.py` measure page fill
-  and append `data/output/resume_log.csv`; they need the optional `resume` extra (`uv sync --extra resume` +
-  `uv run playwright install chromium`), never the base install or default tests. `skills/resume-generator`
+  and append `data/output/resume_log.csv`; they need Chromium (`uv run playwright install chromium`, one time);
+  default tests skip the browser test without it. `skills/resume-generator`
   and `skills/outreach-writer` (symlinked in `.claude/skills/`) take free-text personalization per request plus
   `config/resume/personalization.md`; integrity rules are non-overridable, format rules are defaults.
+  The skills hold no personal data or employer-specific rules (portable to any user): everything
+  per-user, including conditional per-employer rules, lives in `personalization.md`, started by
+  copying the tracked `config/resume/personalization.example.md` (fake values, sibling of
+  `candidate_profile.example.yaml`; the real file stays git-ignored). Legacy `<!-- NOTE (tailoring
+  rule) -->` comments inside a master resume are still honored, but new rules go in `personalization.md`.
+  An unedited copy of the example is withheld by `resume-files` (`personalization: null` plus a
+  `personalization_warning`) while its `TEMPLATE-NOT-CUSTOMIZED` line survives, so sample rules never
+  steer real output. `resume-files` also lints `personalization.md` (`personalization_problems`: an unknown
+  `## ` section that would be silently ignored, leftover sample text) and, given `--company NAME` (the JD's
+  output folder name), returns `personalization_company_rules`: the rules that name that employer, by
+  deterministic text match (`resume_source.company_rules`), so employer-specific rules don't rest on the
+  model's judgment alone. Role-conditioned rules use a leading tag (`- [role: program manager, TPM] ...`):
+  `resume-files --jd <JD file>` (which reads the role from the file's first line and the company from its
+  `data/output/<Company>/` folder, so no job text reaches a shell) returns `personalization_role_rules`,
+  the tagged rules whose title phrases match the job title as whole words (`resume_source.role_rules`);
+  the skills apply a tagged rule only when it is listed. `tests/test_no_owner_pii_in_shareable_files.py` fails if the real profile's contact
+  details (name, surname as a whole word, email, phone, handles) appear in any tracked or non-ignored file
+  (skips with no real profile; `JOB_HUNTER_PII_SKIP_SURNAME=1` skips only the surname check).
+  `tests/test_skills_portable.py` guards all user-facing skills against employer/domain examples and PII.
 
 - **`health.py`** — `detect_count_anomaly` flags (doesn't fail) a source whose job count drops
-  >70% from its last known count — guards against adapters "succeeding" against a changed page
-  structure while returning far fewer/no jobs.
+  >70% from its last known *non-zero* count (`source_health.last_nonzero_job_count`, migration v5) —
+  guards against adapters "succeeding" against a changed page structure while returning far
+  fewer/no jobs. The baseline ignores zero-job runs: storing 0 as the baseline once let a second
+  empty run compare 0 → 0 unflagged (Apple vanished from the 2026-09-30 radar this way, and the
+  radar's stale-source fallback only covers `failed` or early-stopped `warning` sources). `apple.py` also raises on an empty
+  first page, so that case is `failed` and fallback-eligible. Only a clean `ok` run advances the
+  baseline; an early-stopped partial run (a `warning` with a `failure_kind` or `error_type`) never does.
 
 - **`models.py`** — pydantic schema: `JobSummary` (listing data) → `Job` (summary + detail +
   location decision + dedup metadata); `SearchResult` is the CLI/skill output envelope.
@@ -481,15 +566,17 @@ ranked `SearchResult` JSON.
   slugifying) — fixes an incident where a `--companies`-scoped run silently overwrote a same-day
   65-source archive. Omitting `--companies` (most runs) is unaffected.
 
-  `resolve_search_path()`'s "newest" fallback is raw mtime, and every refilter re-stamps its
-  target — so a narrow, frequently-refiltered archive can permanently outrank a larger one
-  collected more recently (`pipeline --no-scrape` with no `--keyword` once picked a 1-company
-  archive over a 43-company sweep 2 days older). `pipeline --no-scrape --search PATH` is the
-  escape hatch for a caller who knows the exact archive. For a caller who doesn't, `job-hunter
+  `resolve_search_path()`'s "newest" is the run date in the archive's filename, with mtime only
+  breaking a same-date tie (`_recency_key`). It used to be raw mtime, which broke twice: every
+  refilter re-stamps its target (`pipeline --no-scrape` with no `--keyword` once picked a
+  1-company archive over a 43-company sweep 2 days older), and copying `data/` from another
+  machine scrambles every mtime (the live radar rendered an 11-day-old archive, so almost
+  nothing showed `[New]`). Remaining gap: two archives with the *same* date and different
+  keywords still fall back to mtime. `pipeline --no-scrape --search PATH` is the escape hatch
+  for a caller who knows the exact archive. For a caller who doesn't, `job-hunter
   resolve-search` prints a stderr scope summary (`scope: N sources attempted (top 5 by job
   count...)`) from the resolved archive's `source_health`, making a mismatch visible at resolution
-  time; stdout's bare-path contract is unchanged. Mtime-based resolution itself remains a known,
-  deliberately out-of-scope gap.
+  time; stdout's bare-path contract is unchanged.
 
   `data/assessments.json`/the `assessments` table are deliberately **global**, never split per
   keyword/run — a verdict is a property of *(job, resume)*, not of whichever search surfaced it;
@@ -506,11 +593,13 @@ ranked `SearchResult` JSON.
 
   One disclosed exception to "pure presentation": the stale-source-collection fallback
   (`docs/pipeline-refilter-stale-source-plan.md` §4.3) — a source whose live collection `failed`
-  this run (not `warning`, which had real live data; not `unsupported`, which has no cached data)
-  still has last-known-good jobs in SQLite. `build()` merges that source's current active/
+  this run, or a `warning` that stopped early (carries a `failure_kind` or an `error_type`: only a partial
+  listing was kept) — not a count-drop `warning`, which had real live data; not `unsupported`, which has no
+  cached data — still has last-known-good jobs in SQLite. `build()` merges that source's current active/
   eligible/prefilter/recency-passing jobs (`active_pool.source_jobs()`) into the rendered pool,
   extending its Collection Issues row with a note (job count + last-collected time, or "no prior
-  data" if never succeeded) — no per-row badge, the note is the only signal. This is why `build()`
+  data" if never succeeded); a "Rate limited"/"Timed out" badge marks the row, and `rate_limited_sources` (sources that
+  stopped early and kept partial results) in the radar's `--result-json` feeds `PipelineManifest` (a would-be `complete` run with any ends `partial`). This is why `build()`
   takes `database_path`; the archive file is never rewritten, only the HTML, so re-running stays
   idempotent. `--no-collection-fallback` (default: on) restores the old no-jobs note. Scoped to
   `render_radar.py` alone, not `collector.py` — the live collector's meaning ("jobs fetched this

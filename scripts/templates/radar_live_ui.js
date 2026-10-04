@@ -108,6 +108,7 @@
           var it = res.json && res.json.item;
           setApp(item.key, it ? pick(it) : null);
           applyFilters();
+          if (item.celebrate && it && it.status === 'offer') announceOffer(item.key, it);
         }
         if (res.json && res.json.export_warning) {
           notice('Saved, but the export files could not be refreshed: ' + res.json.export_warning);
@@ -178,6 +179,16 @@
     if (next) apps[o.key] = next; else delete apps[o.key];
   });
 
+  // Fired only after the server acknowledged a save that newly reached "offer"; the forest
+  // themes listen for it. With no listener (default theme) nothing happens.
+  function announceOffer(key, app) {
+    try {
+      window.dispatchEvent(new CustomEvent('jobhunter:application-status', {
+        detail: { status: app.status, key: key }
+      }));
+    } catch (e) { /* CustomEvent unavailable: the save already succeeded, skip the flourish */ }
+  }
+
   function saveApp(row) {
     var key = keyOf(row), panel = row.querySelector('.app-panel');
     var status = panel.querySelector('.app-status').value;
@@ -203,8 +214,9 @@
       var notes = panel.querySelector('.app-notes').value;
       payload.notes = notes.trim() === '' ? null : notes;
     }
+    var celebrate = payload.status !== null && L.isNewOffer(apps[key] ? apps[key].status : '', payload.status);
     setApp(key, appFromPayload(key, payload));
-    sync.queue({ kind: 'application', key: key, payload: payload });
+    sync.queue({ kind: 'application', key: key, payload: payload, celebrate: celebrate });
     applyFilters();
   }
 
@@ -378,6 +390,7 @@
       if (g === 'tag') f.tags.push(v);
       else if (g === 'arrangement') f.arrangement.push(v);
       else if (g === 'sponsorship') f.sponsorship.push(v);
+      else if (g === 'hide' && v === 'no-sponsorship') f.hideNoSponsorship = true;
     });
     var min = parseInt(minScore.value, 10);
     f.minScore = isNaN(min) ? null : Math.max(0, Math.min(100, min));
@@ -395,6 +408,10 @@
   function writeFilters(f) {
     search.value = f.query;
     chips.forEach(function (c) {
+      if (c.dataset.filterGroup === 'hide') {
+        c.classList.toggle('active', c.dataset.filterValue === 'no-sponsorship' && f.hideNoSponsorship);
+        return;
+      }
       var list = c.dataset.filterGroup === 'tag' ? f.tags
         : c.dataset.filterGroup === 'arrangement' ? f.arrangement : f.sponsorship;
       c.classList.toggle('active', list.indexOf(c.dataset.filterValue) !== -1);

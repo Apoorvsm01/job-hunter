@@ -1,6 +1,6 @@
 ---
 name: job-reviewer
-version: 1.3.0
+version: 1.3.1
 description: Score job-hunter's archived candidates against the user's resume, on either a local LLM (LM Studio, default — never spends cloud/agent tokens) or this calling agent itself ("Claude engine," opt-in, spends the user's own Claude usage) — resumes automatically from wherever a prior run left off regardless of which engine scored what.
 compatibility: Requires uv and Python 3.11+. LM Studio required only for the local-model engine; the Claude engine needs no local model at all.
 metadata:
@@ -41,13 +41,13 @@ rest with Claude (or vice versa) is safe and expected, not a special case.
 
 ## Examples
 
-- `/job-reviewer --keyword ADAS` — engine not stated; ask, then start (or resume) reviewing the
-  newest ADAS archive
-- `/job-reviewer --keyword ADAS with Claude` — Claude engine, no LM Studio needed
-- `/job-reviewer --keyword ADAS` (re-invoked after an interruption) — resumes automatically,
+- `/job-reviewer --keyword Analytics` — engine not stated; ask, then start (or resume) reviewing the
+  newest Analytics archive
+- `/job-reviewer --keyword Analytics with Claude` — Claude engine, no LM Studio needed
+- `/job-reviewer --keyword Analytics` (re-invoked after an interruption) — resumes automatically,
   already-scored jobs are skipped regardless of which engine scored them, never restarts from
   scratch
-- `/job-reviewer --status --keyword ADAS` — check remaining/cached/total counts, no model calls,
+- `/job-reviewer --status --keyword Analytics` — check remaining/cached/total counts, no model calls,
   engine-agnostic (this count is identical either way)
 - `/job-reviewer --search data/searches/adas_2026-08-20.json` — review one specific historical
   archive by exact path, bypassing keyword resolution
@@ -94,7 +94,7 @@ Output:
    likely to take a while.
 4. Run the review:
    ```bash
-   uv run python scripts/review_with_lm_studio.py --project "$CLAUDE_PROJECT_DIR" [--keyword "ADAS,Robotics,Product Technical Leader"]
+   uv run python scripts/review_with_lm_studio.py --project "$CLAUDE_PROJECT_DIR" [--keyword "Analytics,Data Engineer,Product Manager"]
    ```
    Sends every not-yet-cached U.S.-eligible candidate to the local model **one at a time, strictly
    sequentially**, persisting each verdict immediately (SQLite plus `data/assessments.json`) as it

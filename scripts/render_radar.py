@@ -61,11 +61,14 @@ from pathlib import Path
 from typing import Any
 
 from job_hunter.active_pool import source_jobs as _pool_source_jobs
+from job_hunter.active_pool import stopped_early as _stopped_early
+from job_hunter.active_pool import wants_fallback as _wants_fallback
 from job_hunter.atomic import atomic_write_text
 from job_hunter.config import CandidateProfile, load_profile, load_settings
 from job_hunter.rootutil import add_project_argument, chdir_to_project_root, nonneg_int
 from job_hunter.search_archive import resolve_search_path
 from job_hunter.storage import Storage
+from job_hunter.theme import EMPTY, THEMES, ResolvedTheme, load_theme, resolve_theme_name
 
 _TEMPLATE_PATH = Path(__file__).resolve().parent / "templates" / "radar_template.html"
 _TEMPLATE_DIR = _TEMPLATE_PATH.parent
@@ -303,6 +306,13 @@ def _app_panel_html(app: dict[str, Any] | None, *, hidden: bool) -> str:
     )
 
 
+def _stale_source_tag(note: str | None) -> str:
+    """Per-company warning on a job merged in from a source whose scrape failed or stopped early."""
+    if not note:
+        return ""
+    return f'<span class="tag tag-stale" title="{html.escape(note, quote=True)}">Source stale</span>'
+
+
 def _row_html(
     row: dict[str, Any], *, live: bool = False, feedback: dict[str, dict[str, Any]] | None = None,
     apps: dict[str, dict[str, Any]] | None = None,
@@ -318,6 +328,7 @@ def _row_html(
     other_tags = ""
     if row.get("long_standing"):
         other_tags += '<span class="tag tag-long-standing">Long-standing</span>'
+    other_tags += _stale_source_tag(row.get("stale_source_note"))
     other_tags += _sponsorship_tag(row.get("visa_sponsorship"))
     other_tags += _arrangement_tag(row.get("work_arrangement"))
     filter_attrs = _filter_data_attrs(
@@ -426,6 +437,7 @@ def _never_reviewed_row_html(
     other_tags = ""
     if is_long_standing:
         other_tags += '<span class="tag tag-long-standing">Long-standing</span>'
+    other_tags += _stale_source_tag(candidate.get("stale_source_note"))
     other_tags += _sponsorship_tag(candidate.get("visa_sponsorship"))
     other_tags += _arrangement_tag(candidate.get("work_arrangement"))
     filter_attrs = _filter_data_attrs(
@@ -504,13 +516,28 @@ _SOURCE_ISSUE_ORDER = {"failed": 0, "warning": 1, "unsupported": 2}
 _SOURCE_ISSUE_LABEL = {"failed": "Failed", "warning": "Warning", "unsupported": "Unsupported"}
 
 
+_FAILURE_KIND_BADGE = {
+    "rate_limited": ("Rate limited", "ratelimited"),
+    "timeout": ("Timed out", "timeout"),
+}
+
+
+def _source_issue_badge(health: dict[str, Any]) -> tuple[str, str]:
+    """(label, css suffix): a recorded `failure_kind` wins over the bare status."""
+    badge = _FAILURE_KIND_BADGE.get(health.get("failure_kind") or "")
+    if badge:
+        return badge
+    status = health.get("status", "failed")
+    return _SOURCE_ISSUE_LABEL.get(status, status.title()), status
+
+
 def _source_issue_row_html(health: dict[str, Any]) -> str:
     status = health.get("status", "failed")
-    label = _SOURCE_ISSUE_LABEL.get(status, status.title())
+    label, badge_css = _source_issue_badge(health)
     message = health.get("message") or "No error message recorded."
     return f'''
     <div class="source-issue source-issue-{_attr(status)}">
-      <span class="tag tag-source-{_attr(status)}">{_e(label)}</span>
+      <span class="tag tag-source-{_attr(badge_css)}">{_e(label)}</span>
       <span class="source-issue-company">{_e(health.get("company") or health.get("source_key"))}</span>
       <span class="source-issue-message">{_e(message)}</span>
     </div>'''
@@ -520,6 +547,51 @@ def _source_issue_rows_html(entries: list[dict[str, Any]]) -> str:
     if not entries:
         return '<p class="empty-state">Every attempted source collected successfully this run.</p>'
     return "".join(_source_issue_row_html(h) for h in entries)
+
+
+def _rate_limited_sources(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Sources that stopped early and kept partial results (the key stays `rate_limited_sources`
+    for compatibility; `failure_kind` is None when the stop was a plain error)."""
+    return [
+        {
+            "source_key": h.get("source_key"),
+            "company": h.get("company"),
+            "status": h.get("status"),
+            "failure_kind": h.get("failure_kind"),
+            "http_status": h.get("http_status"),
+            "retry_after_seconds": h.get("retry_after_seconds"),
+            "jobs_kept": h.get("job_count") or 0,
+        }
+        for h in entries
+        if _stopped_early(h)
+    ]
+
+
+def _merge_pool_jobs(
+    candidates: dict[tuple[str, str], dict[str, Any]],
+    database_path: Path,
+    source_key: str,
+    profile: CandidateProfile,
+    max_age_days: int,
+    keywords: list[str] | None,
+    now: datetime,
+    stale_note: str | None = None,
+) -> int:
+    """Merge one source's stored active/eligible jobs not already in `candidates`, in place;
+    returns how many were added. `stale_note` is stamped on each merged job so its row can carry
+    a per-company warning tag (the failed scrape itself never removes a job)."""
+    merged = 0
+    for job in _pool_source_jobs(
+        database_path, source_key, profile, max_age_days, keywords=keywords, now=now
+    ):
+        key = (job.source_key, job.job_id)
+        if key in candidates:
+            continue
+        candidates[key] = json.loads(job.model_dump_json())
+        if stale_note:
+            candidates[key]["stale_source_note"] = stale_note
+        merged += 1
+    return merged
 
 
 def _apply_collection_fallback(
@@ -538,12 +610,15 @@ def _apply_collection_fallback(
     rendered report (with a note explaining why they're there) instead of a `failed` source
     silently showing zero jobs even though real, recently-collected data for it exists on disk.
 
-    Deliberately scoped to `status == "failed"` only, never `warning` or `unsupported` — see the
-    plan's section 4.3 for the reasoning: a `warning` source already produced real live data this
-    run (health.py's count-anomaly check just flagged the count as suspiciously low), so mixing
-    in old jobs on top of a partial-but-real result would blur what actually happened this run
-    rather than clarify it; `unsupported` is a permanent, already-disclosed config.py state that
-    never fetches jobs at all, so it never has cached data to fall back to regardless.
+    Deliberately scoped to `failed` and to `warning`s carrying a `failure_kind` (a rate-limited or
+    timed-out partial run), never count-drop `warning`s or `unsupported` — see the plan's section
+    4.3 for the reasoning: a count-drop `warning` source already produced real live data this run
+    (health.py's count-anomaly check just flagged the count as suspiciously low), so mixing in old
+    jobs on top of it would blur what actually happened this run rather than clarify it;
+    `unsupported` is a permanent, already-disclosed config.py state that never fetches jobs at
+    all, so it never has cached data to fall back to regardless. A `failure_kind` warning is
+    different: collection stopped early on purpose, so the earlier jobs it did not re-collect are
+    exactly what is missing.
 
     Returns `(updated_source_issues, fallback_provenance)`: `updated_source_issues` is the same
     shape as before — every `failed` entry's own `message` extended with the fallback note,
@@ -568,7 +643,7 @@ def _apply_collection_fallback(
     re-scan that table once per failure either."""
     updated: list[dict[str, Any]] = []
     fallback_provenance: list[dict[str, Any]] = []
-    failed_keys = [h.get("source_key") for h in source_issues if h.get("status") == "failed"]
+    failed_keys = [h.get("source_key") for h in source_issues if _wants_fallback(h)]
     last_success_by_key: dict[str, str | None] = {}
     if failed_keys:
         with Storage(database_path) as storage:
@@ -578,7 +653,7 @@ def _apply_collection_fallback(
             for key in failed_keys
         }
     for health in source_issues:
-        if health.get("status") != "failed":
+        if not _wants_fallback(health):
             updated.append(health)
             continue
         health = dict(health)
@@ -586,18 +661,29 @@ def _apply_collection_fallback(
         last_success_at = last_success_by_key.get(source_key)
         base_message = health.get("message") or "No error message recorded."
         merged = 0
-        if not last_success_at:
+        if health.get("status") == "warning":
+            # A partial (rate-limited/timed-out) run already stored its own jobs; add the
+            # earlier ones this run didn't re-collect. Independent of last_success_at, which a
+            # partial run itself just advanced.
+            merged = _merge_pool_jobs(
+                candidates, database_path, source_key, profile, max_age_days, keywords, now,
+                stale_note="Collection stopped early today; this job is from an earlier scrape",
+            )
+            note = (
+                f"Collection stopped early today — showing {merged} earlier job(s) "
+                "this run did not re-collect."
+                if merged
+                else "Collection stopped early today — no additional earlier jobs to show."
+            )
+        elif not last_success_at:
             note = "Failed to scrape — no prior successful data available for this source."
         else:
-            fallback_jobs = _pool_source_jobs(
-                database_path, source_key, profile, max_age_days, keywords=keywords, now=now
+            merged = _merge_pool_jobs(
+                candidates, database_path, source_key, profile, max_age_days, keywords, now,
+                stale_note=(
+                    f"Source failed to scrape today; last collected {_fmt_local_date(last_success_at)}"
+                ),
             )
-            for job in fallback_jobs:
-                key = (job.source_key, job.job_id)
-                if key in candidates:
-                    continue
-                candidates[key] = json.loads(job.model_dump_json())
-                merged += 1
             note = (
                 f"Failed to scrape today — showing {merged} job(s) from the last successful "
                 f"scrape on {_fmt_local_date(last_success_at)}."
@@ -739,6 +825,7 @@ def render(
     collection_fallback: bool = True,
     live: bool = False,
     live_state: LiveState | None = None,
+    theme: ResolvedTheme | None = None,
 ) -> tuple[str, dict[str, Any]]:
     if live and live_state is None:
         raise ValueError("live=True requires a LiveState")
@@ -813,6 +900,7 @@ def render(
                 "work_arrangement": candidate.get("work_arrangement"),
                 "state": candidate.get("state"),
                 "country": candidate.get("country"),
+                "stale_source_note": candidate.get("stale_source_note"),
             }
         )
 
@@ -929,6 +1017,11 @@ def render(
         ),
         "__SOURCE_ISSUES_ROWS__": _source_issue_rows_html(source_issues),
     }
+    # Theme CSS/JS ride on token values the template already has, so `auto` (EMPTY) adds nothing
+    # and the default page stays byte-identical.
+    active_theme = theme or EMPTY
+    tokens["__LIVE_STYLE__"] += active_theme.css
+    tokens["__LIVE_SCRIPT__"] += active_theme.script_html
     # Single pass: substituted text is never rescanned, so data containing a token is inert.
     out = re.sub(r"__[A-Z][A-Z0-9_]*__", lambda m: tokens.get(m.group(0), m.group(0)), template)
     return out, {
@@ -943,6 +1036,9 @@ def render(
         # ever folded into the HTML report's prose note. Empty whenever collection_fallback=False
         # or no source failed this run.
         "stale_source_fallback": fallback_provenance,
+        # Sources that stopped early and kept partial results (a `failure_kind`, or a warning
+        # with an `error_type`), for a caller reading --result-json (background-collection retries).
+        "rate_limited_sources": _rate_limited_sources(source_issues),
     }
 
 
@@ -1015,6 +1111,21 @@ def add_selection_arguments(parser: argparse.ArgumentParser) -> None:
             "note-with-no-jobs behavior for a source that failed to scrape this run"
         ),
     )
+    parser.add_argument(
+        "--theme", choices=THEMES, default=None,
+        help=(
+            "page theme for this run (default: settings.yaml's radar.theme; "
+            "auto = the plain light/dark page)"
+        ),
+    )
+
+
+def resolve_page_theme(
+    args: argparse.Namespace, settings: Any, profile: CandidateProfile | None
+) -> ResolvedTheme:
+    """`--theme` wins over settings.yaml's radar.theme; `auto` resolves to the empty theme."""
+    name = resolve_theme_name(getattr(args, "theme", None), settings.radar.theme)
+    return load_theme(name, profile, templates_dir=_TEMPLATE_DIR / "themes")
 
 
 def selection_render_kwargs(
@@ -1036,6 +1147,7 @@ def selection_render_kwargs(
         max_age_days=settings.search.max_posting_age_days,
         keywords=keywords,
         collection_fallback=not args.no_collection_fallback,
+        theme=resolve_page_theme(args, settings, profile),
     )
 
 
@@ -1054,7 +1166,9 @@ def main() -> int:
             "success — a structured result for a caller (job-hunter pipeline) to read instead "
             "of parsing this script's own human-readable stdout, and to know which sources in "
             "this report came from the live run vs. the stale-source fallback (empty list when "
-            "--no-collection-fallback or no source failed). Purely additive: stdout is unchanged."
+            "--no-collection-fallback or no source failed), plus \"rate_limited_sources\": [{\"source_key\", "
+            "\"company\", \"status\", \"failure_kind\", \"http_status\", \"retry_after_seconds\", "
+            "\"jobs_kept\"}, ...] for sources that stopped early and kept partial results. Purely additive: stdout is unchanged."
         ),
     )
     add_project_argument(parser)
@@ -1083,6 +1197,7 @@ def main() -> int:
                 {
                     "report_path": str(output_path),
                     "stale_source_fallback": stats["stale_source_fallback"],
+                    "rate_limited_sources": stats["rate_limited_sources"],
                 }
             )
             + "\n",

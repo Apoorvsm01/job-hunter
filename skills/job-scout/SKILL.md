@@ -1,6 +1,6 @@
 ---
 name: job-scout
-version: 1.1.1
+version: 1.3.0
 description: Search configured employer career sites for current U.S.-eligible jobs matching a keyword/title or the candidate profile, and archive the results for review.
 compatibility: Requires uv and Python 3.11+. No LM Studio dependency — this stage only searches and archives, it never scores anything.
 metadata:
@@ -19,8 +19,8 @@ pipeline in one go, use the `job-hunter` orchestrator skill instead; it calls th
 ## Examples
 
 - `/job-scout` — profile-driven search, no keyword
-- `/job-scout ADAS` — keyword-scoped search
-- `/job-scout ADAS or Robotics or "Product Technical Leader"` — multiple keywords/phrases
+- `/job-scout Analytics` — keyword-scoped search
+- `/job-scout Analytics or "Data Engineer" or "Product Manager"` — multiple keywords/phrases
 
 ## Contract
 
@@ -44,15 +44,15 @@ Output:
 1. Every command below takes `--project "$CLAUDE_PROJECT_DIR"` (Claude Code) — or the equivalent
    workspace path for another runtime, e.g. Hermes — so this skill works regardless of whether the
    calling process already `cd`'d into the repo.
-2. If invoked with one or more keywords/titles (e.g. `/job-scout ADAS`, `/job-scout ADAS or
-   Robotics or "Product Technical Leader"`), normalize them into a comma-separated list,
+2. If invoked with one or more keywords/titles (e.g. `/job-scout Analytics`, `/job-scout Analytics or
+   "Data Engineer" or "Product Manager"`), normalize them into a comma-separated list,
    preserving multi-word phrases as single entries, and pass it as `--keyword`. Otherwise omit
    `--keyword` entirely — the search then falls back to `config/candidate_profile.yaml`'s
    `target_title_terms`/`target_domains` (or `candidate_profile.example.yaml` if the real file
    doesn't exist).
 3. Run:
    ```bash
-   uv run job-hunter search --project "$CLAUDE_PROJECT_DIR" --json --archive [--keyword "ADAS,Robotics,Product Technical Leader"]
+   uv run job-hunter search --project "$CLAUDE_PROJECT_DIR" --json --archive [--keyword "Analytics,Data Engineer,Product Manager"]
    ```
    `--archive` writes to `data/searches/{slug}_{date}.json` — the same keyword on the same day
    overwrites (refreshing today's answer), a new day or a different keyword always gets its own
@@ -80,3 +80,24 @@ Output:
 Onsite, hybrid, and remote jobs are all acceptable output — remote jobs require explicit U.S.
 eligibility evidence, already enforced by the collector. Do not substitute broad web searches for
 adapter failures unless the user explicitly requests that fallback.
+
+## Background collection
+
+For a long or rate-limited sweep, collect in the background instead of waiting on `search`:
+
+- Start: `uv run job-hunter collect start --project "$CLAUDE_PROJECT_DIR" [--companies a,b] [--slow]`
+  returns immediately. `--slow` fetches one source at a time with a delay between them.
+- Poll: `uv run job-hunter collect status --project "$CLAUDE_PROJECT_DIR"` shows progress and any
+  rate-limited, timed-out or failed sources. `collect stop` ends it cooperatively (in-flight sources
+  finish; no archive is written).
+- Build an archive any time from what has been collected so far:
+  `uv run job-hunter snapshot --project "$CLAUDE_PROJECT_DIR"`, then run the command it prints,
+  `job-hunter pipeline --no-scrape --search <path> [--review]`.
+- A completed run writes the normal archive itself.
+- Do not run `cleanup --apply` while a collector is running; it refuses.
+
+## Spotting vocabulary gaps
+
+Optional, after a scrape: `uv run job-hunter near-misses --project "$CLAUDE_PROJECT_DIR"` lists
+rejected-but-relevant-looking jobs new since the last scan. It is a human scouting aid (not scored, not in the
+radar); its vocabulary hints feed the job-feedback flow.

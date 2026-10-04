@@ -6,10 +6,11 @@ import httpx
 import pytest
 import respx
 
+import job_hunter.adapters as adapters_pkg
 from job_hunter.adapters.adp_recruiting import AdpRecruitingAdapter
 from job_hunter.adapters.apple import AppleAdapter
 from job_hunter.adapters.ashby import AshbyAdapter
-from job_hunter.adapters.base import SchemaError
+from job_hunter.adapters.base import RateLimitError, SchemaError, nested
 from job_hunter.adapters.bosch import BoschAdapter
 from job_hunter.adapters.brose import BroseAdapter
 from job_hunter.adapters.eightfold import EightfoldAdapter
@@ -307,6 +308,80 @@ async def test_greenhouse_unescapes_double_encoded_content():
     assert jobs[0].department == "Engineering"
     assert detail.description == '<div class="content-intro"><p>We do sponsor visas!</p></div>'
     assert "&lt;" not in detail.description
+
+
+@pytest.mark.parametrize(
+    "data, path, expected",
+    [
+        ({"departments": [{"name": "Ops"}]}, "departments.0.name", "Ops"),
+        ({"departments": []}, "departments.0.name", None),  # empty list: index out of range
+        ({"departments": [{"name": "Ops"}]}, "departments.3.name", None),
+        ({"departments": []}, "departments.0", None),
+        ({"place": []}, "place.0", None),
+        ({"a": {"b": []}}, "a.b.0.c", None),
+        ({"departments": [{"name": "Ops"}]}, "departments.0.missing", None),  # unchanged behavior
+        ({"departments": "Ops"}, "departments.0.name", None),  # wrong type, unchanged
+    ],
+)
+def test_nested_returns_the_default_for_any_path_that_is_not_there(data, path, expected):
+    assert nested(data, path) == expected
+    assert nested(data, path, "fallback") == (expected if expected is not None else "fallback")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_a_job_with_no_department_does_not_fail_the_whole_greenhouse_source():
+    """Live regression (Zipline, 2026-10-01): 1 of 352 postings had `departments: []`, and
+    `departments.0.name` raised IndexError, failing the entire source for 17 consecutive runs."""
+    url = "https://boards-api.greenhouse.io/v1/boards/example/jobs"
+    base = {
+        "absolute_url": "https://job-boards.greenhouse.io/example/jobs/1",
+        "location": {"name": "Austin, TX"},
+        "first_published": "2024-12-20T13:53:38-05:00",
+        "content": "&lt;p&gt;Hello&lt;/p&gt;",
+    }
+    payload = {
+        "jobs": [
+            {**base, "id": 1, "title": "Ops Lead", "departments": [{"name": "Operations"}]},
+            {**base, "id": 2, "title": "Customer Advocate", "departments": []},
+            {**base, "id": 3, "title": "Pilot", "departments": [{"name": "Flight"}]},
+        ]
+    }
+    respx.get(url).mock(return_value=httpx.Response(200, json=payload))
+    company = CompanyConfig(
+        key="example", company="Example", adapter="greenhouse",
+        config={
+            "list_url": url, "items_path": "jobs", "listing_description_path": "content",
+            "fields": {
+                "id": "id", "title": "title", "url": "absolute_url",
+                "location": "location.name", "department": "departments.0.name",
+                "posted_at": "first_published",
+            },
+        },
+    )
+    async with httpx.AsyncClient() as client:
+        jobs = await GreenhouseAdapter(
+            company, client, CollectionConfig(max_retries=0)
+        ).fetch_summaries()
+    assert [(job.job_id, job.department) for job in jobs] == [
+        ("1", "Operations"), ("2", None), ("3", "Flight"),
+    ]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_an_items_path_that_is_not_there_still_fails_loudly():
+    """Making nested() tolerant must not make *structural* paths silent: a response whose
+    items_path no longer resolves to a list is still a SchemaError, not zero jobs."""
+    url = "https://boards-api.greenhouse.io/v1/boards/example/jobs"
+    respx.get(url).mock(return_value=httpx.Response(200, json={"items": []}))
+    company = CompanyConfig(
+        key="example", company="Example", adapter="greenhouse",
+        config={"list_url": url, "items_path": "items.0.requisitionList", "fields": {}},
+    )
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(SchemaError, match="items_path did not resolve to a list"):
+            await GreenhouseAdapter(company, client, CollectionConfig(max_retries=0)).fetch_summaries()
 
 
 def _greenhouse_company(url: str, **extra_fields):
@@ -1508,6 +1583,30 @@ async def test_apple_stops_pagination_once_stale():
 
 @pytest.mark.asyncio
 @respx.mock
+@pytest.mark.parametrize("search", [{"totalRecords": 0, "searchResults": []}, {"searchResults": []}])
+async def test_apple_empty_first_page_fails_loudly(search):
+    """A US-scoped Apple search is never legitimately empty. An empty first page (observed
+    live: a transient empty response) must raise rather than return [] and be recorded as a
+    healthy zero-job source."""
+    respx.get(url__regex=r"https://jobs\.apple\.com/en-us/search.*").mock(
+        return_value=httpx.Response(
+            200, text=_hydration_html({"loaderData": {"search": search}})
+        )
+    )
+    company = CompanyConfig(
+        key="apple",
+        company="Apple",
+        adapter="apple",
+        config={"list_url": "https://jobs.apple.com/en-us/search?location=united-states-USA"},
+    )
+    async with httpx.AsyncClient() as client:
+        adapter = AppleAdapter(company, client, CollectionConfig(max_retries=0))
+        with pytest.raises(SchemaError, match="no results"):
+            await adapter.fetch_summaries()
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_page_number_parameter_pagination():
     base = "https://jobs.example/search"
     page1 = f"<main>{''.join(_card(f'P{i}') for i in range(2))}</main>"
@@ -2163,3 +2262,242 @@ async def test_ycombinator_sets_company_per_job_and_fetches_description():
     assert "Design the future." in detail.description
     assert "Figma" in detail.description
     assert "5+ years" in detail.description
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_apple_keeps_earlier_pages_when_a_later_batch_is_rate_limited():
+    now = datetime.now(UTC)
+
+    def _respond(request: httpx.Request) -> httpx.Response:
+        page = int(request.url.params.get("page"))
+        if page == 1:
+            data = {"totalRecords": 60, "searchResults": [_apple_result("p1", now - timedelta(days=1))]}
+            return httpx.Response(200, text=_hydration_html({"loaderData": {"search": data}}))
+        return httpx.Response(429, headers={"Retry-After": "60"})
+
+    respx.get(url__regex=r"https://jobs\.apple\.com/en-us/search.*").mock(side_effect=_respond)
+    company = CompanyConfig(
+        key="apple", company="Apple", adapter="apple",
+        config={
+            "list_url": "https://jobs.apple.com/en-us/search?location=united-states-USA",
+            "page_size": 20, "max_concurrent_pages": 1,
+        },
+    )
+    async with httpx.AsyncClient() as client:
+        adapter = AppleAdapter(company, client, CollectionConfig(max_retries=0))
+        with pytest.raises(RateLimitError):
+            await adapter.fetch_summaries()
+    assert [job.job_id for job in adapter.kept] == ["p1"]
+
+
+CONVERTED_ADAPTERS = [
+    "adp_recruiting", "bosch", "csod", "dayforce", "eightfold", "html_paginated",
+    "icims_attract", "oracle_hcm", "paycom", "phenom", "smartrecruiters",
+    "successfactors_rmk_v2", "ultipro", "workday",
+]
+
+
+@pytest.mark.parametrize("name", CONVERTED_ADAPTERS)
+def test_paginating_adapter_registers_its_listing_for_salvage(name):
+    source = (Path(adapters_pkg.__file__).parent / f"{name}.py").read_text()
+    assert "self.begin_listing()" in source, f"{name} must register its accumulator"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_plain_html_paginated_still_treats_an_empty_page_after_jobs_as_the_end():
+    """Only stealth sources apply the strict empty-continuation rule; a plain adapter keeps
+    the long-standing behavior (an empty page after some jobs is a graceful end)."""
+    page1 = f"<main>{''.join(_card(f'P{i}') for i in range(2))}</main>"
+
+    def _respond(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("page") == "2":
+            return httpx.Response(200, text="<main></main>")
+        return httpx.Response(200, text=page1)
+
+    respx.get(url__regex=r".*").mock(side_effect=_respond)
+    company = CompanyConfig(
+        key="test", company="Test", adapter="html_paginated",
+        config={
+            "list_url": "https://jobs.example/search", "card_selector": ".job",
+            "title_selector": ".title", "link_selector": ".title",
+            "location_selector": ".location", "page_number_parameter": "page", "page_size": 2,
+        },
+    )
+    async with httpx.AsyncClient() as client:
+        jobs = await HtmlPaginatedAdapter(
+            company, client, CollectionConfig(max_retries=0)
+        ).fetch_summaries()
+    assert [job.job_id for job in jobs] == ["P0", "P1"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_html_paginated_keeps_earlier_pages_when_a_later_page_is_rate_limited():
+    page1 = f"<main>{''.join(_card(f'P{i}') for i in range(2))}</main>"
+
+    def _respond(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("page") == "2":
+            return httpx.Response(429, headers={"Retry-After": "60"})
+        return httpx.Response(200, text=page1)
+
+    respx.get(url__regex=r".*").mock(side_effect=_respond)
+    company = CompanyConfig(
+        key="test", company="Test", adapter="html_paginated",
+        config={
+            "list_url": "https://jobs.example/search", "card_selector": ".job",
+            "title_selector": ".title", "link_selector": ".title",
+            "location_selector": ".location", "page_number_parameter": "page", "page_size": 2,
+        },
+    )
+    async with httpx.AsyncClient() as client:
+        adapter = HtmlPaginatedAdapter(company, client, CollectionConfig(max_retries=0))
+        with pytest.raises(RateLimitError):
+            await adapter.fetch_summaries()
+    assert [job.job_id for job in adapter.kept] == ["P0", "P1"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_html_multi_index_keeps_the_indexes_it_finished_before_a_rate_limit():
+    def _respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/b"):
+            return httpx.Response(429)
+        return httpx.Response(200, text=f"<main>{_card('A0')}</main>")
+
+    respx.get(url__regex=r".*").mock(side_effect=_respond)
+    company = CompanyConfig(
+        key="test", company="Test", adapter="html_multi_index",
+        config={
+            "index_urls": ["https://jobs.example/a", "https://jobs.example/b"],
+            "card_selector": ".job", "title_selector": ".title", "link_selector": ".title",
+            "location_selector": ".location",
+        },
+    )
+    async with httpx.AsyncClient() as client:
+        adapter = HtmlMultiIndexAdapter(company, client, CollectionConfig(max_retries=0))
+        with pytest.raises(RateLimitError):
+            await adapter.fetch_summaries()
+    assert [job.job_id for job in adapter.kept] == ["A0"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_oracle_hcm_keeps_earlier_pages_when_a_later_page_is_rate_limited():
+    base = "https://jobs.example/reqs?onlyData=true&finder=findReqs;offset=0"
+
+    def _respond(request: httpx.Request) -> httpx.Response:
+        if "offset=0" in str(request.url):
+            return httpx.Response(200, json=_oracle_page(["1", "2"], total=4))
+        return httpx.Response(429)
+
+    respx.get(url__regex=r".*").mock(side_effect=_respond)
+    company = CompanyConfig(
+        key="ford", company="Ford", adapter="oracle_hcm",
+        config={
+            "paginate": True, "list_url": base,
+            "items_path": "items.0.requisitionList", "total_path": "items.0.TotalJobsCount",
+            "fields": {
+                "id": "Id", "title": "Title", "url": "Id",
+                "location": "PrimaryLocation", "posted_at": "PostedDate",
+            },
+        },
+    )
+    async with httpx.AsyncClient() as client:
+        adapter = OracleHcmAdapter(company, client, CollectionConfig(max_retries=0))
+        with pytest.raises(RateLimitError):
+            await adapter.fetch_summaries()
+    assert [job.job_id for job in adapter.kept] == ["1", "2"]
+
+
+def test_smartrecruiters_pay_from_custom_fields():
+    """Intuitive posts pay only as structured customField entries, never in the text."""
+    from job_hunter.adapters.smartrecruiters import pay_text_from_custom_fields
+    from job_hunter.salary import evaluate_salary
+
+    def field(label, value):
+        return {"fieldLabel": label, "valueLabel": value}
+
+    payload = {
+        "customField": [
+            field("Max. Salary Region 2", "208500 USD"),
+            field("Max. Salary Region 1", "245300 USD"),
+            field("Min. Salary Region 1", "170500 USD"),
+            field("Min. Salary Region 2", "144900 USD"),
+            field("Ways of Working", "Onsite - This job is fully onsite."),
+        ]
+    }
+    text = pay_text_from_custom_fields(payload)
+    assert "Region 1: $170,500 - $245,300 USD" in text
+    assert "Region 2: $144,900 - $208,500 USD" in text
+    decision = evaluate_salary(text)
+    assert (decision.min_value, decision.max_value) == (144900.0, 245300.0)
+    # one region -> just that range; non-USD, half a pair or min > max -> nothing, never a guess
+    assert pay_text_from_custom_fields({"customField": payload["customField"][1:3]}) == (
+        "Pay range: $170,500 - $245,300 USD."
+    )
+    assert pay_text_from_custom_fields({"customField": [field("Min. Salary Region 1", "1 EUR")]}) is None
+    assert pay_text_from_custom_fields({"customField": [field("Min. Salary Region 1", "5 USD")]}) is None
+    assert pay_text_from_custom_fields({}) is None
+
+
+def _avature_page(titles: list[str]) -> str:
+    cards = "".join(
+        f'<article class="article--result"><h3 class="t"><a href="/job/{t}">{t}</a></h3></article>'
+        for t in titles
+    ) or (
+        '<article class="article--result"><h3 class="t">No jobs found</h3></article>'
+    )
+    return f"<html><body>{cards}</body></html>"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_html_empty_page_placeholder_ends_the_listing_when_jobs_exist():
+    """Harman (Avature): a catalog that is an exact multiple of page_size is followed by a
+    'No jobs found' placeholder inside the same card element — the end of the listing, not a
+    broken card."""
+    base = "https://jobs.example/search"
+    respx.get(base, params={"off": "2"}).mock(return_value=httpx.Response(200, text=_avature_page([])))
+    respx.get(base, params={"off": "0"}).mock(return_value=httpx.Response(200, text=_avature_page(["a", "b"])))
+    respx.get(base).mock(return_value=httpx.Response(200, text=_avature_page(["a", "b"])))
+    cfg = {
+        "list_url": base, "card_selector": "article.article--result", "link_selector": ".t a",
+        "title_selector": ".t a", "page_parameter": "off", "page_size": 2, "max_pages": 5,
+        "empty_page_text": "No jobs found",
+    }
+    company = CompanyConfig(key="h", company="H", adapter="html_paginated", config=cfg)
+    async with httpx.AsyncClient() as client:
+        jobs = await HtmlPaginatedAdapter(company, client, CollectionConfig(max_retries=0)).fetch_summaries()
+    assert [j.title for j in jobs] == ["a", "b"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_html_empty_page_placeholder_on_the_first_page_still_fails_loudly():
+    base = "https://jobs.example/search"
+    respx.get(base).mock(return_value=httpx.Response(200, text=_avature_page([])))
+    cfg = {
+        "list_url": base, "card_selector": "article.article--result", "link_selector": ".t a",
+        "title_selector": ".t a", "empty_page_text": "No jobs found",
+    }
+    company = CompanyConfig(key="h", company="H", adapter="html_paginated", config=cfg)
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(SchemaError):
+            await HtmlPaginatedAdapter(company, client, CollectionConfig(max_retries=0)).fetch_summaries()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_html_placeholder_without_the_setting_is_still_a_schema_error():
+    """Opt-in only: no silent behavior change for any other source."""
+    base = "https://jobs.example/search"
+    respx.get(base).mock(return_value=httpx.Response(200, text=_avature_page(["a", "b"]) + _avature_page([])))
+    company = CompanyConfig(key="h", company="H", adapter="html_paginated", config={
+        "list_url": base, "card_selector": "article.article--result", "link_selector": ".t a",
+        "title_selector": ".t a",
+    })
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(SchemaError):
+            await HtmlPaginatedAdapter(company, client, CollectionConfig(max_retries=0)).fetch_summaries()
