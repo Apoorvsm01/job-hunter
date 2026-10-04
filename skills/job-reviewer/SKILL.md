@@ -1,8 +1,8 @@
 ---
 name: job-reviewer
-version: 1.2.0
-description: Score job-hunter's archived candidates against the user's resume using a local LLM (LM Studio) — resumes automatically from wherever a prior run left off, never spends cloud/agent tokens.
-compatibility: Requires uv and Python 3.11+; LM Studio required (local model scoring via its OpenAI-compatible API).
+version: 1.3.0
+description: Score job-hunter's archived candidates against the user's resume, on either a local LLM (LM Studio, default — never spends cloud/agent tokens) or this calling agent itself ("Claude engine," opt-in, spends the user's own Claude usage) — resumes automatically from wherever a prior run left off regardless of which engine scored what.
+compatibility: Requires uv and Python 3.11+. LM Studio required only for the local-model engine; the Claude engine needs no local model at all.
 metadata:
   job_hunter:
     stage: review
@@ -17,16 +17,38 @@ that's starting a review, checking progress, or resuming one that was interrupte
 search→review→radar pipeline in one go, use the `job-hunter` orchestrator skill instead; it calls
 this same command.
 
-**Scoring happens outside this agent entirely, on a local model — you never score a job
-yourself.** `scripts/review_with_lm_studio.py` is a plain deterministic script (see its docstring
-for one-time LM Studio setup), not a sub-agent.
+## Engine choice — ask every time, unless already stated
+
+There are two scoring engines. **Determine which one before doing anything else**: if the user's
+own request already names one ("review with Claude," "use the local model," "LM Studio please"),
+use that. Otherwise, ask them — don't default silently, and don't remember a choice from an
+earlier turn as still standing for this one.
+
+- **LM Studio (default if the user has no preference and none was asked yet in this
+  conversation):** a local model, zero cloud/agent tokens, fully deterministic. **Scoring happens
+  outside this agent entirely — you never score a job yourself.**
+  `scripts/review_with_lm_studio.py` is a plain deterministic script (see its docstring for
+  one-time LM Studio setup), not a sub-agent. Go to **Procedure A**.
+- **Claude (opt-in):** this session scores each job itself, using the exact same rubric a local
+  model would get, spending the user's own Claude usage instead of a local model's compute. Worth
+  mentioning before committing: pending-count × (description length) roughly predicts how much of
+  this turn it'll take, same way the LM Studio path's own `--status` step is meant to set
+  expectations before a long run. Go to **Procedure B**.
+
+Both engines write to the exact same store (SQLite `assessments`, keyed by `content_hash`), so
+they're fully interchangeable run to run — reviewing half a batch with LM Studio and finishing the
+rest with Claude (or vice versa) is safe and expected, not a special case.
 
 ## Examples
 
-- `/job-reviewer --keyword ADAS` — start (or resume) reviewing the newest ADAS archive
+- `/job-reviewer --keyword ADAS` — engine not stated; ask, then start (or resume) reviewing the
+  newest ADAS archive
+- `/job-reviewer --keyword ADAS with Claude` — Claude engine, no LM Studio needed
 - `/job-reviewer --keyword ADAS` (re-invoked after an interruption) — resumes automatically,
-  already-scored jobs are skipped, never restarts from scratch
-- `/job-reviewer --status --keyword ADAS` — check remaining/cached/total counts, no model calls
+  already-scored jobs are skipped regardless of which engine scored them, never restarts from
+  scratch
+- `/job-reviewer --status --keyword ADAS` — check remaining/cached/total counts, no model calls,
+  engine-agnostic (this count is identical either way)
 - `/job-reviewer --search data/searches/adas_2026-08-20.json` — review one specific historical
   archive by exact path, bypassing keyword resolution
 - `/job-reviewer` — cold start, resolves to the newest archive of any keyword (not a resume
@@ -36,8 +58,11 @@ for one-time LM Studio setup), not a sub-agent.
 
 Input:
 - project path (`--project`, defaults to `$JOB_HUNTER_ROOT`/cwd)
+- engine: LM Studio (default) or Claude — asked of the user per invocation, see "Engine choice" above
 - keyword or archive path (`--keyword` / `--input`, defaults to the newest archive overall)
-- `--status` (report-only: remaining/cached/total counts, no model calls, no changes made)
+- `--status` (report-only: remaining/cached/total counts, no model calls, no changes made;
+  engine-agnostic) or, for the Claude engine, `--export-pending PATH` (same counts plus the full
+  resume/rubric/candidate payload to score, still no model calls)
 - optional limit (`--limit`, defaults to unlimited) and `--force` (re-review even cached jobs)
 
 Output:
@@ -49,7 +74,7 @@ Output:
 - failures: per-job `skipped: <reason>` lines printed to stdout, never aborting the whole run
 - next command: `job-radar` with the same `--keyword`, to render the scored results
 
-## Procedure
+## Procedure A — LM Studio engine (default)
 
 1. Every command below takes `--project "$CLAUDE_PROJECT_DIR"` (Claude Code) — or the equivalent
    workspace path for another runtime, e.g. Hermes — so this skill works regardless of whether the
@@ -112,3 +137,55 @@ Output:
    `uv run job-hunter export-assessments --project "$CLAUDE_PROJECT_DIR"`) for the verdicts to
    compile from — never invent a score, match, or gap not actually present in a recorded
    assessment.
+
+## Procedure B — Claude engine (opt-in, this agent scores each job itself)
+
+Same archive-resolution rule as Procedure A step 2. The only thing that changes is *who* scores
+each job — persistence, caching, and resumability are identical either way, because both engines
+write through the exact same `record-assessment` primitive and the exact same `content_hash`-keyed
+cache.
+
+1. Export the pending set — no LM Studio required, no model call, no network at all:
+   ```bash
+   uv run python scripts/review_with_lm_studio.py --project "$CLAUDE_PROJECT_DIR" --export-pending /tmp/job-hunter-pending.json [--keyword "..."] [--limit N] [--force]
+   ```
+   This writes `{"resume_path", "resume", "rubric", "threshold", "skipped_cached", "candidates":
+   [{"source_key","job_id","company","title","location","url","description"}, ...]}` — the exact
+   same resume text, rubric text, and not-yet-cached candidate set Procedure A would have sent to
+   the local model, boilerplate-trimmed the same way. Report the pending count (`len(candidates)`)
+   and `skipped_cached` to the user before scoring a large batch — same expectation-setting
+   `--status` already gives Procedure A.
+2. If `candidates` is empty, report `skipped_cached` and stop — nothing to do.
+3. Score each candidate **one at a time**, in list order (mirrors Procedure A's strictly-sequential
+   design — there's no reason to parallelize and every reason not to: it keeps behavior and
+   resumability identical between engines). For each one, apply the exported `rubric` text and the
+   same evidence standard Procedure A's local model is held to — this is not a lighter-touch
+   pass just because it's cheaper to run:
+   - Score 0-100 using the exact calibration bands in the rubric (90-100 exceptional, 80-89
+     strong, 75-79 good, 60-74 partial, 40-59 weak, 0-39 poor).
+   - `recommended` is true only when score ≥ the exported `threshold` **and** no clearly unmet hard
+     requirement makes the candidate unsuitable — a high score with one disqualifying hard
+     requirement is not recommended.
+   - Never infer or invent experience, tools, certifications, or scope the resume doesn't
+     explicitly establish; an absent qualification is "not evidenced," not assumed absent or
+     assumed present.
+   - Do not award points for location — U.S. eligibility is already established upstream.
+   - `matches`/`gaps`: as many concrete, evidence-based items as the job genuinely supports — there
+     is no database-enforced minimum, unlike the local model's own stricter self-check (2-4/1-3),
+     so a job with no real description text (some listings genuinely have none) gets an honest
+     low-confidence entry saying exactly that, never a padded-out fabricated match.
+4. Persist that verdict immediately, before moving to the next candidate — this is what makes an
+   interrupted Claude-engine run exactly as resumable as Procedure A:
+   ```bash
+   uv run job-hunter record-assessment --project "$CLAUDE_PROJECT_DIR" --payload '{"source_key":"...","job_id":"...","company":"...","title":"...","url":"...","score":87,"recommended":true,"matches":["..."],"gaps":["..."],"resume_path":"<the exported resume_path>"}'
+   ```
+   `content_hash` is never supplied — the CLI always derives it server-side from the job's current
+   stored content, so a job whose posting changes after this scoring is correctly treated as
+   unassessed again next time, same as Procedure A.
+5. After the last candidate, report the same shape of summary Procedure A's final line gives:
+   how many were newly reviewed this run vs. already cached. Then run
+   `uv run python scripts/assessments_to_csv.py --project "$CLAUDE_PROJECT_DIR"` and proceed to
+   step 8 above (render via `job-radar`) — identical to Procedure A from here on.
+6. If interrupted partway through the scoring loop, simply re-invoke from step 1 — already-recorded
+   verdicts are cached by `content_hash` exactly like Procedure A, so the re-exported pending file
+   will only contain what's genuinely still unscored.

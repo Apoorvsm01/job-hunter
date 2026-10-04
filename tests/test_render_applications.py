@@ -121,3 +121,10 @@ def test_template_tokens_in_titles_and_notes_render_literally():
     html = _page([_app(title=hostile, notes=hostile)])
     assert html.count(hostile) == 2
     assert html.count("<script") == 4
+
+
+def test_manual_application_shows_added_manually_not_removed():
+    html = _page([_app("era-design-engineer", source_key="manual", score=None, location=None)])
+    assert posting_state(None, "manual") == "manual"
+    assert 'data-posting="manual"' in html and "Added manually" in html
+    assert "Posting removed" not in html

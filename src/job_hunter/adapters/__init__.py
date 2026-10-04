@@ -28,6 +28,7 @@ from .successfactors_rmk_v2 import SuccessFactorsRmkV2Adapter
 from .ultipro import UltiProAdapter
 from .unsupported import UnsupportedAdapter
 from .workday import WorkdayAdapter
+from .ycombinator import YCombinatorAdapter
 from .zf import ZfAdapter
 
 AdapterType: TypeAlias = type[JobAdapter]
@@ -57,6 +58,7 @@ ADAPTERS: dict[str, AdapterType] = {
     "zf": ZfAdapter,
     "dayforce": DayforceAdapter,
     "icims_attract": IcimsAttractAdapter,
+    "ycombinator": YCombinatorAdapter,
     "unsupported": UnsupportedAdapter,
 }
 

@@ -166,6 +166,11 @@ class ApplicationStatus(StrEnum):
     WITHDRAWN = "withdrawn"
 
 
+MANUAL_SOURCE_KEY = "manual"
+"""`applications.source_key` for an application added by hand (`job-hunter add-application`) to a
+posting job-hunter never collected; its snapshot comes from the caller, not the `jobs` table."""
+
+
 class Application(BaseModel):
     """A human-tracked application to one collected job. `company`/`title`/`url`/... are a
     snapshot taken once, when tracking starts, so the row stays readable after the posting closes

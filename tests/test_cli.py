@@ -678,3 +678,26 @@ def test_export_jd_unknown_job_exits_1(tmp_path, monkeypatch, capsys):
     _bare_project(tmp_path, monkeypatch)
     assert main(["export-jd", "acme", "nope"]) == 1
     assert "not found" in capsys.readouterr().err
+
+
+def test_add_application_tracks_an_uncollected_posting_and_updates_on_rerun(tmp_path, monkeypatch, capsys):
+    _bare_project(tmp_path, monkeypatch)
+    argv = ["add-application", "--company", "Acme", "--title", "Design Engineer",
+            "--url", "https://example.com/jobs/1", "--applied-at", "2026-10-01", "--notes", "Application received"]
+    assert main(argv) == 0
+    item = json.loads(capsys.readouterr().out)["item"]
+    assert (item["source_key"], item["job_id"]) == ("manual", "acme-design-engineer")
+    assert (item["status"], item["applied_at"], item["url"]) == ("applied", "2026-10-01", "https://example.com/jobs/1")
+    assert main(["add-application", "--company", "Acme", "--title", "Design Engineer",
+                 "--url", "https://example.com/jobs/1", "--status", "rejected"]) == 0
+    capsys.readouterr()
+    rows = json.loads((tmp_path / "data" / "applications.json").read_text())
+    assert len(rows) == 1 and rows[0]["status"] == "rejected" and rows[0]["applied_at"] == "2026-10-01"
+
+
+def test_add_application_rejects_non_http_url_and_saved_with_date(tmp_path, monkeypatch, capsys):
+    _bare_project(tmp_path, monkeypatch)
+    base = ["add-application", "--company", "Acme", "--title", "Designer"]
+    assert main([*base, "--url", "javascript:alert(1)"]) == 2
+    assert main([*base, "--url", "https://example.com", "--status", "saved", "--applied-at", "2026-10-01"]) == 2
+    assert not (tmp_path / "data" / "applications.json").exists()

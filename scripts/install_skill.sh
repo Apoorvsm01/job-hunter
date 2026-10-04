@@ -6,9 +6,10 @@ SKILL_NAMES="job-hunter job-scout job-reviewer job-radar job-feedback onboard-so
 usage() {
   cat >&2 <<EOF
 usage: install_skill.sh [--copy|--link] [--update] [--uninstall] [--force] [--dry-run]
-                         [--hermes] [--claude-global] [--claude-local] [--opencode] [--all]
+                         [--hermes] [--claude-global] [--claude-local] [--antigravity]
+                         [--antigravity-global] [--opencode] [--all]
 
-Installs all nine job-hunter skills ($SKILL_NAMES) — the job-hunter orchestrator, the
+Installs all job-hunter skills ($SKILL_NAMES) — the job-hunter orchestrator, the
 independently-invocable job-scout/job-reviewer/job-radar stages (see docs/skill-split-plan.md),
 job-feedback for turning radar feedback/profile edits into a confirmed profile update, and
 onboard-source (a repo-maintenance skill for extending job-hunter itself, installed for every
@@ -20,11 +21,13 @@ extra installs).
 With no target flags, prompts interactively for which runtime(s) to install into.
 Pass one or more target flags to install non-interactively (e.g. for scripting).
 
-  --hermes         ~/.hermes/skills/<name> plus the candidate-profile diff hook
-  --claude-global   ~/.claude/skills/<name>
-  --claude-local    <this repo>/.claude/skills/<name>
-  --opencode        ~/.config/opencode/skills/<name>
-  --all             all four of the above
+  --hermes              ~/.hermes/skills/<name> plus the candidate-profile diff hook
+  --claude-global       ~/.claude/skills/<name>
+  --claude-local        <this repo>/.claude/skills/<name>
+  --antigravity         <this repo>/.agents/skills/<name> plus hook
+  --antigravity-global  ~/.gemini/config/skills/<name>
+  --opencode            ~/.config/opencode/skills/<name>
+  --all                 all six of the above
 
   --copy            copy each skill directory instead of symlinking it
   --link            symlink each skill directory (the default when --copy is not given;
@@ -56,6 +59,8 @@ mode=link
 want_hermes=0
 want_claude_global=0
 want_claude_local=0
+want_antigravity_local=0
+want_antigravity_global=0
 want_opencode=0
 any_target=0
 want_update=0
@@ -74,11 +79,15 @@ while [ $# -gt 0 ]; do
     --hermes) want_hermes=1; any_target=1 ;;
     --claude-global) want_claude_global=1; any_target=1 ;;
     --claude-local) want_claude_local=1; any_target=1 ;;
+    --antigravity|--agents-local) want_antigravity_local=1; any_target=1 ;;
+    --antigravity-global) want_antigravity_global=1; any_target=1 ;;
     --opencode) want_opencode=1; any_target=1 ;;
     --all)
       want_hermes=1
       want_claude_global=1
       want_claude_local=1
+      want_antigravity_local=1
+      want_antigravity_global=1
       want_opencode=1
       any_target=1
       ;;
@@ -102,10 +111,12 @@ if [ "$any_target" -eq 0 ]; then
     exit 2
   fi
   echo "Install the job-hunter skills ($SKILL_NAMES) for which runtime(s)?"
-  echo "  1) Hermes             (~/.hermes/skills/<name>)"
-  echo "  2) Claude - global    (~/.claude/skills/<name>, all projects)"
-  echo "  3) Claude - local     (this repo only, ./.claude/skills/<name>)"
-  echo "  4) OpenCode           (~/.config/opencode/skills/<name>)"
+  echo "  1) Hermes                 (~/.hermes/skills/<name>)"
+  echo "  2) Claude - global        (~/.claude/skills/<name>, all projects)"
+  echo "  3) Claude - local         (this repo only, ./.claude/skills/<name>)"
+  echo "  4) Antigravity - local    (this repo only, ./.agents/skills/<name>)"
+  echo "  5) Antigravity - global   (~/.gemini/config/skills/<name>)"
+  echo "  6) OpenCode               (~/.config/opencode/skills/<name>)"
   printf 'Enter one or more numbers separated by spaces (or "all"): '
   read -r selection
   for choice in $selection; do
@@ -113,12 +124,21 @@ if [ "$any_target" -eq 0 ]; then
       1) want_hermes=1 ;;
       2) want_claude_global=1 ;;
       3) want_claude_local=1 ;;
-      4) want_opencode=1 ;;
-      all) want_hermes=1; want_claude_global=1; want_claude_local=1; want_opencode=1 ;;
+      4) want_antigravity_local=1 ;;
+      5) want_antigravity_global=1 ;;
+      6) want_opencode=1 ;;
+      all)
+        want_hermes=1
+        want_claude_global=1
+        want_claude_local=1
+        want_antigravity_local=1
+        want_antigravity_global=1
+        want_opencode=1
+        ;;
       *) echo "ignoring unrecognized choice: $choice" >&2 ;;
     esac
   done
-  if [ "$want_hermes$want_claude_global$want_claude_local$want_opencode" = "0000" ]; then
+  if [ "$want_hermes$want_claude_global$want_claude_local$want_antigravity_local$want_antigravity_global$want_opencode" = "000000" ]; then
     echo "nothing selected; exiting" >&2
     exit 1
   fi
@@ -285,8 +305,17 @@ for name in $SKILL_NAMES; do
   [ "$want_hermes" -eq 1 ] && install_one "${HERMES_HOME:-$HOME/.hermes}/skills/$name" "$abs_source" "$abs_source"
   [ "$want_claude_global" -eq 1 ] && install_one "$HOME/.claude/skills/$name" "$abs_source" "$abs_source"
   [ "$want_claude_local" -eq 1 ] && install_one "$repo_root/.claude/skills/$name" "../../skills/$name" "$abs_source"
+  [ "$want_antigravity_local" -eq 1 ] && install_one "$repo_root/.agents/skills/$name" "../../skills/$name" "$abs_source"
+  [ "$want_antigravity_global" -eq 1 ] && install_one "$HOME/.gemini/config/skills/$name" "$abs_source" "$abs_source"
   [ "$want_opencode" -eq 1 ] && install_one "$HOME/.config/opencode/skills/$name" "$abs_source" "$abs_source"
 done
+
+if [ "$want_antigravity_local" -eq 1 ]; then
+  if [ ! -e "$repo_root/GEMINI.md" ] && [ -e "$repo_root/CLAUDE.md" ]; then
+    ln -s CLAUDE.md "$repo_root/GEMINI.md"
+    echo "LINK CLAUDE.md -> GEMINI.md"
+  fi
+fi
 
 if [ "$want_hermes" -eq 1 ]; then
   hermes_home=${HERMES_HOME:-"$HOME/.hermes"}
@@ -306,3 +335,4 @@ if [ "$want_hermes" -eq 1 ]; then
 fi
 
 exit 0
+

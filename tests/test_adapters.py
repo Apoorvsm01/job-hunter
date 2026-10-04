@@ -25,6 +25,7 @@ from job_hunter.adapters.smartrecruiters import SmartRecruitersAdapter
 from job_hunter.adapters.successfactors_rmk_v2 import SuccessFactorsRmkV2Adapter
 from job_hunter.adapters.ultipro import UltiProAdapter
 from job_hunter.adapters.workday import WorkdayAdapter
+from job_hunter.adapters.ycombinator import YCombinatorAdapter
 from job_hunter.config import CollectionConfig, CompanyConfig
 from job_hunter.models import JobSummary, WorkArrangement
 from job_hunter.normalizer import parse_flexible_date
@@ -2099,3 +2100,66 @@ async def test_avature_cards_label_prefixed_location_and_date_with_joboffset_pag
     assert jobs[0].location_raw == "Bucharest - Bucharest, Romania"
     assert jobs[2].location_raw == "New York - USA - 19 West 44th St."
     assert [j.posted_at.strftime("%Y-%m-%d") for j in jobs] == ["2026-07-15", "2026-09-24", "2026-09-22"]
+
+
+def _yc_page(props: dict) -> str:
+    payload = json.dumps({"component": "jobs/public/pages/JobsV2Page", "props": props})
+    escaped = payload.replace("&", "&amp;").replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
+    return f'<html><body><div data-page="{escaped}"></div></body></html>'
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_ycombinator_sets_company_per_job_and_fetches_description():
+    """workatastartup.com is a multi-employer aggregator: unlike every other adapter,
+    `company` must come from each job's own `companyName`, not the fixed companies.yaml
+    entry (which only labels the source as a whole)."""
+    list_url = "https://www.workatastartup.com/jobs/l/designer"
+    listing_props = {
+        "totalJobsCount": 1,
+        "jobs": [
+            {
+                "id": 65008,
+                "title": "Staff Product Designer",
+                "jobType": "Full-time",
+                "location": "San Francisco, CA / Remote (US)",
+                "roleType": "Product design",
+                "companyName": "Ironclad",
+                "applyUrl": "https://account.ycombinator.com/authenticate?...",
+            }
+        ],
+    }
+    respx.get(list_url, params={}).mock(return_value=httpx.Response(200, text=_yc_page(listing_props)))
+    detail_url = "https://www.workatastartup.com/jobs/65008"
+    detail_props = {
+        "job": {
+            "id": 65008,
+            "title": "Staff Product Designer",
+            "location": "San Francisco, CA / Remote (US)",
+            "jobType": "Full-time",
+            "sponsorsVisa": "Can sponsor a visa",
+            "minExperience": "5+ years",
+            "skills": ["Figma", "Design Systems"],
+            "descriptionHtml": "<p>Design the future.</p>",
+        }
+    }
+    respx.get(detail_url).mock(return_value=httpx.Response(200, text=_yc_page(detail_props)))
+
+    company = CompanyConfig(
+        key="ycombinator",
+        company="Y Combinator (Work at a Startup)",
+        adapter="ycombinator",
+        config={"list_url": list_url, "max_pages": 1},
+    )
+    async with httpx.AsyncClient() as client:
+        adapter = YCombinatorAdapter(company, client, CollectionConfig(max_retries=0))
+        jobs = await adapter.fetch_summaries()
+        assert len(jobs) == 1
+        assert jobs[0].company == "Ironclad"
+        assert jobs[0].job_id == "65008"
+        assert jobs[0].url == detail_url
+        assert jobs[0].location_raw == "San Francisco, CA / Remote (US)"
+        detail = await adapter.fetch_detail(jobs[0])
+    assert "Design the future." in detail.description
+    assert "Figma" in detail.description
+    assert "5+ years" in detail.description

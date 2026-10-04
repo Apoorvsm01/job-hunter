@@ -297,6 +297,34 @@ companies:
       # stealth_html entirely once this was found by inspecting the plain HTML directly.
       list_url: https://jobs.apple.com/en-us/search?location=united-states-USA
       page_size: 20
+  - key: ycombinator
+    company: Y Combinator (Work at a Startup)
+    adapter: ycombinator
+    platform: ycombinator
+    config:
+      # workatastartup.com is a multi-employer job board (~1,000+ YC-backed startups), not
+      # one employer — a deliberate exception to this file's usual one-company-per-entry
+      # shape (see ycombinator.py's docstring: it sets `company` per job from the listing's
+      # own `companyName`, not this entry's `company:` above). No login/session needed to
+      # browse or read full job detail (only "Apply" itself redirects to a YC account) —
+      # confirmed live with a bare unauthenticated GET plus a real browser Accept header;
+      # without it the site answers 406/302 and looks bot-blocked, which is what makes this
+      # easy to mistake for needing stealth_html. Scoped to the "Design" role facet
+      # (`/jobs/l/designer`) rather than the full `/jobs` firehose (mostly software
+      # engineering) — matches this profile's UX/design focus.
+      #
+      # Known limitation: the server-rendered page only reliably exposes its first ~21
+      # postings. `?page=2`, `?jobs_page=`, `?offset=`, `?cursor=`, `?after=`, `?p=`,
+      # `?limit=200`, `?per_page=200`, and `?query=<title>` were all tried live and every
+      # one came back byte-identical to page 1 (same 21 job ids, same order) — the
+      # site's deeper pagination/semantic-search (the "Describe your ideal role" box)
+      # is client-side against a backend that isn't this SSR route, not reverse-engineered
+      # here. max_pages stays at 1 so the adapter doesn't waste a request proving that
+      # every run (already confirmed, not guessed). Revisit if workatastartup.com ever
+      # exposes real pagination on this route. No posted_at is exposed by this API at all
+      # (listing or detail) — passes_recency treats that as "keep", per policy.
+      list_url: https://www.workatastartup.com/jobs/l/designer
+      max_pages: 1
   - key: google
     company: Google
     adapter: stealth_html

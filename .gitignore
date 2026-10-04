@@ -1141,3 +1141,6 @@ config/salary_config.json
 # Claude Code session-runtime artifacts, not project content.
 .claude/*.lock
 
+# Agent toggling states
+*.disabled
+
