@@ -278,6 +278,9 @@ that's a cost paid once per company, not per search.
 || fanuc | FANUC America | adp_recruiting | Yes (`postingDate`) | httpx only — ADP Recruiting Management public two-call handshake, same adapter as stellantis; 43 requisitions, all in one `$top=100` call, confirmed sorted newest-first (early-stop viable) |
 || rivian | Rivian | icims_attract | Yes (`posted_date`, confirmed sorted newest-first) | httpx only — iCIMS "Attract" widget's own same-origin `/api/jobs`, found by rendering once and reading its XHR calls; full description inline, no detail fetch needed (738 jobs) |
 | jtekt | JTEKT | dayforce | Yes (`postingStartTimestampUTC`, confirmed sorted newest-first) | httpx only — Ceridian Dayforce Candidate Portal, a public two-call CSRF handshake (`/api/auth/csrf` → token+cookie, replayed on the search POST), same shape as `adp_recruiting.py`; full description inline (46 jobs) |
+| kubota | Kubota | dayforce | Yes (`postingStartTimestampUTC`, confirmed sorted newest-first) | httpx only — same Ceridian Dayforce Candidate Portal handshake as JTEKT (§5.17), config-only (`client_namespace: kubota`); full description inline (37 jobs, all US) |
+| kubota_adp | Kubota (Georgia sites) | adp_recruiting | Yes (`postingDate`, confirmed sorted newest-first) | httpx only — ADP Recruiting Management public two-call handshake (`career_site_domain: kubotaexternal`), config-only; all 27 requisitions in one `$top=100` call, full description inline |
+| kubota_engine | Kubota Engine America | html_paginated | **No** (no listing or detail date, no JSON-LD) | httpx only — SilkRoad OpenHire ePostings, plain server-rendered table (5 jobs, no pagination), job id hashed via `fallback_job_id`, description from `#jobDesciptionDiv`; never recency-filtered since `posted_at` is always empty |
 | mathworks | MathWorks | **unsupported** | n/a | mechanism fully mapped (plain HTML, real `?page=N` pagination, JSON-LD detail) but MathWorks' Akamai bot-management deterministically 403s this project's own identifying User-Agent — see §5.7 |
 | mazda | Mazda North American Operations | workday | Yes (`startDate`) | httpx only — public unauthenticated Workday CXS API served from the same `myworkdaysite.com` vanity host as the real candidate-facing page (only 6 jobs at onboarding time) |
 | zipline | Zipline | greenhouse | Yes (`first_published`) | httpx only — same Greenhouse public Job Board API shape as anthropic/scout_motors, `?content=true` inlines every description (339 jobs); real board token is `flyzipline`, not the guessable `zipline` (404s) — found via the sample job page's own embedded (empty) `greenhouse-embed` div |
@@ -749,7 +752,8 @@ new adapter rather than pure `oracle_hcm`-style config reuse.
 
 ### 5.17 The `dayforce` adapter — a public two-call CSRF handshake
 
-JTEKT's candidate portal (`jobs.dayforcehcm.com`, Ceridian Dayforce) is a Next.js SPA with no job
+JTEKT's candidate portal (`jobs.dayforcehcm.com`, Ceridian Dayforce; Kubota reuses the identical
+adapter with only a different `client_namespace`) is a Next.js SPA with no job
 data in its own server-rendered HTML. Rendering it once with Playwright surfaced the real
 backend: `POST /api/geo/JTEKT/jobposting/search`. That endpoint 403s with no cookie/header
 at all — not a Cloudflare bot-management challenge (no JS challenge page, no `cf-mitigated`

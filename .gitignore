@@ -668,7 +668,7 @@ $RECYCLE.BIN/
 # Directories potentially created on remote AFP share
 
 ### VisualStudioCode ###
-.vscode/*
+.vscode/
 !.vscode/settings.json
 !.vscode/tasks.json
 !.vscode/launch.json

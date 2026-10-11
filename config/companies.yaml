@@ -1094,6 +1094,70 @@ companies:
       client_namespace: JTEKT
       job_board_code: CANDIDATEPORTAL
       culture_code: en-US
+  - key: kubota
+    company: Kubota
+    adapter: dayforce
+    platform: dayforce
+    config:
+      # Same Ceridian Dayforce Candidate Portal platform as JTEKT (above), no new
+      # adapter code: jobs.dayforcehcm.com/kubota/CANDIDATEPORTAL is a Next.js SPA whose
+      # real backend is POST /api/geo/kubota/jobposting/search behind the same anonymous
+      # /api/auth/csrf handshake (confirmed live with plain httpx, no login/browser).
+      # clientNamespace is lowercase `kubota`, matching the portal URL. 37 jobs across
+      # two 25-row pages (paginationStart 0/25 return distinct sets), every job US,
+      # full description inline, listing sorted newest-first by
+      # postingStartTimestampUTC (verified across both pages), so the recency
+      # early-stop is safe. Every posting's locations are locationType 2 (metro/area
+      # labels, no type 1 worksite) — the adapter falls back to the first location, which
+      # is the primary city, with multi-location postings listing several nearby cities.
+      # The user-supplied sample job 7438 now renders Dayforce's "Page not found"
+      # template and is absent from the listing — a closed posting, not an adapter gap;
+      # verified against current ids (e.g. 13556) instead.
+      client_namespace: kubota
+      job_board_code: CANDIDATEPORTAL
+      culture_code: en-US
+  - key: kubota_adp
+    company: Kubota
+    adapter: adp_recruiting
+    platform: adp_recruiting
+    config:
+      # myjobs.adp.com/kubotaexternal/cx is an ADP Recruiting Management SPA — same
+      # platform and zero-code reuse as FANUC/Stellantis: the public two-call handshake
+      # (/public/staffing/v1/career-site/kubotaexternal -> myJobsToken, replayed as the
+      # myjobstoken header) then apply-custom-filters returns all 27 requisitions in one
+      # $top=100 call (a second $skip=100 page is empty) with full description,
+      # postingDate and structured address — no detail fetch. Confirmed sorted
+      # newest-first by postingDate, so early-stop is safe. Every requisition is in
+      # Gainesville or Jefferson, GA (Kubota's Georgia manufacturing sites), a different
+      # tenant and job set from the Dayforce `kubota` source (Texas/Midwest sales,
+      # service and corporate roles) — the two are complementary, not duplicates. Sample
+      # reqId 5001229181106 ("Process Quality Engineer", posted 2026-10-01) confirmed
+      # present.
+      career_site_domain: kubotaexternal
+  - key: kubota_engine
+    company: Kubota Engine America
+    adapter: html_paginated
+    platform: silkroad
+    config:
+      # kubotaengine-openhire.silkroad.com is a SilkRoad OpenHire ePostings board, plain
+      # server-rendered ColdFusion HTML with no bot protection (confirmed with httpx, no
+      # cookies): app.jobsearch lists every opening in one table (5 jobs, no pagination
+      # — the "returned N matching record(s)" banner matches the row count). Rows are
+      # <tr class="cssSearchResultsHighlight|Lowlight"> with tracking code / title link /
+      # location cells; the job id is only in the link's `jobid=` query param, so
+      # job_id falls back to normalizer.fallback_job_id (hash of company+title+
+      # location+url) rather than an attribute. The detail page's description lives in
+      # <dd id="jobDesciptionDiv"> (the id is misspelled upstream). Caveat: neither the
+      # listing nor the detail page carries any posting date or JSON-LD (checked both),
+      # so posted_at is always None — per passes_recency these jobs are never filtered as
+      # stale and show no date; a closed posting simply disappears from the table.
+      # Sample job 172910 ("Engine Remanufacturing Engineer", Lincolnshire IL) confirmed.
+      list_url: https://kubotaengine-openhire.silkroad.com/epostings/index.cfm?fuseaction=app.jobsearch&company_id=17322&version=1
+      card_selector: tr.cssSearchResultsHighlight, tr.cssSearchResultsLowlight
+      link_selector: a
+      title_selector: a
+      location_selector: td:nth-child(3)
+      description_selector: "#jobDesciptionDiv"
   - key: mathworks
     company: MathWorks
     adapter: unsupported
