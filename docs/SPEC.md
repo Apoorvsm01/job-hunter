@@ -1622,6 +1622,12 @@ changed target does not fit.
   (plus `.html` build artifact and `.txt` copy), and a report of word counts and applied
   personalization. It stops when `resume-files` or `contact` fails.
 
+**Browser extension (separate repo).** The one-click extension ("Just Fill it!") lives in
+`../auto_apply_extension` and depends on this package by path. It saves the page it is on as a JD file through
+`jd_export.write_numbered_text` (same reuse/numbering rule as `export_jd`), reads `config/resume/*` and the
+profile's `contact:` block, writes PDFs into `data/output/<Company>/` and appends `data/output/resume_log.csv`
+(its token and draft files stay in its own repo). See that repo's README for its design.
+
 ---
 
 ## 12. Performance notes

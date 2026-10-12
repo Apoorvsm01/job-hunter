@@ -485,6 +485,13 @@ ranked `SearchResult` JSON.
   (skips with no real profile; `JOB_HUNTER_PII_SKIP_SURNAME=1` skips only the surname check).
   `tests/test_skills_portable.py` guards all user-facing skills against employer/domain examples and PII.
 
+- **Browser extension: moved out.** The one-click resume/cover-letter extension ("Just Fill it!", Chrome +
+  Safari) and its local helper now live in their own repo, `../auto_apply_extension`, and use job-hunter as a
+  path dependency (it imports `jd_export`, `config`, `resume_source`, `atomic`, `rootutil`, `runlock`,
+  `applications_export`; keep those APIs stable or update it too). It reads `config/resume/*` and writes
+  `data/output/<Company>/` and `data/output/resume_log.csv` here; its token and drafts stay in its own repo.
+  `jd_export.write_numbered_text` was extracted for it (also used by `export_jd`).
+
 - **`health.py`** — `detect_count_anomaly` flags (doesn't fail) a source whose job count drops
   >70% from its last known *non-zero* count (`source_health.last_nonzero_job_count`, migration v5) —
   guards against adapters "succeeding" against a changed page structure while returning far
