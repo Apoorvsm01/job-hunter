@@ -90,8 +90,9 @@ class ConfigurableJsonAdapter(JobAdapter):
         description_path = cfg.get("detail_description_path")
         if not description_path:
             return JobDetail(
-                description=_concat_description(
-                    summary.raw, cfg.get("listing_description_path", "description")
+                description=self.augment_description(
+                    summary.raw,
+                    _concat_description(summary.raw, cfg.get("listing_description_path", "description")),
                 )
             )
         api_url = summary.url

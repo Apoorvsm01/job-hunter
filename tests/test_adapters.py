@@ -29,6 +29,7 @@ from job_hunter.adapters.workday import WorkdayAdapter
 from job_hunter.config import CollectionConfig, CompanyConfig
 from job_hunter.models import JobSummary, WorkArrangement
 from job_hunter.normalizer import parse_flexible_date
+from job_hunter.salary import evaluate_salary
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -113,6 +114,60 @@ async def test_lever_listing_description_path_concatenates_lists_and_additional(
     assert "Build ADAS features." in detail.description
     assert "Minimum Qualifications" in detail.description
     assert "International Traffic in Arms Regulations" in detail.description
+
+
+@pytest.mark.asyncio
+@respx.mock
+@pytest.mark.parametrize(
+    ("salary_range", "expected"),
+    [
+        ({"min": 146000, "max": 199000, "currency": "USD", "interval": "per-year-salary"}, True),
+        # Never guess: hourly, non-USD, inverted or absent ranges add nothing.
+        ({"min": 50, "max": 70, "currency": "USD", "interval": "per-hour-wage"}, False),
+        ({"min": 90000, "max": 120000, "currency": "EUR", "interval": "per-year-salary"}, False),
+        ({"min": 199000, "max": 146000, "currency": "USD", "interval": "per-year-salary"}, False),
+        (None, False),
+    ],
+)
+async def test_lever_structured_salary_range_is_added_to_description(salary_range, expected):
+    """Lever postings carry pay as a structured `salaryRange` object that is not part of
+    description/lists/additional (confirmed live on Zoox), so the text mine found nothing."""
+    url = "https://api.example/jobs"
+    job = {
+        "id": "zoox-1",
+        "text": "Sensor Engineer",
+        "hostedUrl": "https://jobs.lever.co/zoox/zoox-1",
+        "categories": {"location": "Foster City, CA"},
+        "description": "Build sensors.",
+        "lists": [],
+        "additional": "Zoox also offers a comprehensive package of benefits.",
+    }
+    if salary_range:
+        job["salaryRange"] = salary_range
+    respx.get(url).mock(return_value=httpx.Response(200, json=[job]))
+    company = CompanyConfig(
+        key="zoox",
+        company="Zoox",
+        adapter="lever",
+        config={
+            "list_url": url,
+            "items_path": "",
+            "fields": {"id": "id", "title": "text", "url": "hostedUrl", "location": "categories.location"},
+            "listing_description_path": ["description", "lists", "additional"],
+        },
+    )
+    async with httpx.AsyncClient() as client:
+        adapter = LeverAdapter(company, client, CollectionConfig(max_retries=0))
+        jobs = await adapter.fetch_summaries()
+        detail = await adapter.fetch_detail(jobs[0])
+    assert "Build sensors." in detail.description
+    result = evaluate_salary(detail.description)
+    if expected:
+        assert "$146,000 - $199,000" in detail.description
+        assert (result.min_value, result.max_value) == (146000.0, 199000.0)
+    else:
+        assert "Pay range" not in detail.description
+        assert result.min_value is None
 
 
 @pytest.mark.asyncio
@@ -496,6 +551,35 @@ async def test_phenom_fixture():
     assert "Validate ADAS features" in detail.description
     assert "&lt;" not in detail.description
     assert detail.employment_type == "FULL_TIME"
+    # No pay range in this fixture's page, so nothing is appended.
+    assert "Pay range" not in detail.description
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_phenom_detail_appends_embedded_pay_range():
+    """Honda keeps pay in a page-embedded `jobPostingSalaryRange` field, not in the
+    JSON-LD description, so the text mine used to find nothing."""
+    detail_url = "https://careers.example/us/en/job/123/adas-test-engineer"
+    page = (FIXTURES / "phenom/detail.html").read_text().replace(
+        "</head>", '<script>var x={"jobPostingSalaryRange":"$84,500.00 - $105,600.00"};</script></head>', 1
+    )
+    respx.get(detail_url).mock(return_value=httpx.Response(200, text=page))
+    company = CompanyConfig(
+        key="honda", company="Honda", adapter="phenom",
+        config={"list_url": "https://careers.example/us/en/search-results"},
+    )
+    summary = JobSummary(
+        source_key="honda", source_platform="phenom", company="Honda",
+        job_id="123", title="ADAS Test Engineer", url=detail_url,
+    )
+    async with httpx.AsyncClient() as client:
+        adapter = PhenomAdapter(company, client, CollectionConfig(max_retries=0))
+        detail = await adapter.fetch_detail(summary)
+    assert "Validate ADAS features" in detail.description
+    assert "$84,500.00 - $105,600.00" in detail.description
+    result = evaluate_salary(detail.description)
+    assert (result.min_value, result.max_value) == (84500.0, 105600.0)
 
 
 def _oracle_page(job_ids: list[str], total: int) -> dict:
