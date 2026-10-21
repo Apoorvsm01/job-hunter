@@ -37,6 +37,19 @@ def _extract_embedded_json(text: str, key: str) -> dict:
     raise SchemaError(f"unterminated embedded data for key {key!r}")
 
 
+_PAY_RANGE = re.compile(r'"jobPostingSalaryRange"\s*:\s*"([^"]+)"')
+
+
+def pay_text_from_page(text: str) -> str | None:
+    """Honda keeps its pay range only in a page-embedded `jobPostingSalaryRange` field
+    (e.g. "$84,500.00 - $105,600.00"), never in the JSON-LD description, so a text mine of
+    the description finds nothing. Turns it into a plain sentence the shared
+    `salary.evaluate_salary` reads like any other posting; a missing or empty field adds
+    nothing."""
+    match = _PAY_RANGE.search(text)
+    return f"Pay range: {match.group(1).strip()}." if match else None
+
+
 def _slugify(title: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
     return slug or "role"
@@ -115,6 +128,10 @@ class PhenomAdapter(JobAdapter):
         if not posting:
             return JobDetail()
         description = posting.get("description")
+        description = normalize_text(html.unescape(description)) if description else None
+        pay = pay_text_from_page(response.text)
+        if pay:
+            description = f"{description}\n\n{pay}" if description else pay
         # Honda's JSON-LD datePosted has been observed drifting forward over time
         # (verified: read back as "today" for a job whose listing-level postedDate was
         # ~2 weeks earlier) — it looks like a "last shown as active" timestamp, not a
@@ -122,7 +139,7 @@ class PhenomAdapter(JobAdapter):
         # more trustworthy of the two; this only overrides it when a detail fetch
         # actually happens (see collector.py's should_detail).
         return JobDetail(
-            description=normalize_text(html.unescape(description)) if description else None,
+            description=description,
             posted_at=parse_flexible_date(posting.get("datePosted")),
             employment_type=stringify(posting.get("employmentType")),
         )

@@ -668,7 +668,7 @@ $RECYCLE.BIN/
 # Directories potentially created on remote AFP share
 
 ### VisualStudioCode ###
-.vscode/*
+.vscode/
 !.vscode/settings.json
 !.vscode/tasks.json
 !.vscode/launch.json
@@ -1148,3 +1148,6 @@ config/salary_config.json
 
 # Local settings (copy of config/settings.example.yaml); keeps personal choices out of the repo.
 config/settings.yaml
+
+# Ignore content of brag folder
+brag-output
