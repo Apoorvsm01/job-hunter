@@ -16,6 +16,7 @@ from .greenhouse import GreenhouseAdapter
 from .html_multi_index import HtmlMultiIndexAdapter
 from .html_paginated import HtmlPaginatedAdapter
 from .icims_attract import IcimsAttractAdapter
+from .jobright_minisite import JobrightMinisiteAdapter
 from .lever import LeverAdapter
 from .oracle_hcm import OracleHcmAdapter
 from .paycom import PaycomAdapter
@@ -59,6 +60,7 @@ ADAPTERS: dict[str, AdapterType] = {
     "dayforce": DayforceAdapter,
     "icims_attract": IcimsAttractAdapter,
     "ycombinator": YCombinatorAdapter,
+    "jobright_minisite": JobrightMinisiteAdapter,
     "unsupported": UnsupportedAdapter,
 }
 

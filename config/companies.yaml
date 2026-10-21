@@ -364,6 +364,23 @@ companies:
       # (listing or detail) — passes_recency treats that as "keep", per policy.
       list_url: https://www.workatastartup.com/jobs/l/designer
       max_pages: 1
+  - key: newgrad_design
+    company: newgrad-jobs.com (Creatives and Design)
+    adapter: jobright_minisite
+    platform: jobright_minisite
+    config:
+      # newgrad-jobs.com/?k=cd is a Webflow shell; its "Creatives and Design" tab iframes a
+      # jobright.ai minisite whose "load more" calls a public, unauthenticated JSON API
+      # (POST jobright.ai/swan/mini-sites/list?position=N&count=50, body {"category": ...}),
+      # found in the page's JS chunk and replayed with plain httpx. `position` is a real
+      # offset (0 and 50 return different jobs, confirmed live). Multi-employer aggregator
+      # like ycombinator: `company` comes from each job (see jobright_minisite.py).
+      # Listing-only: jobright's per-job pages rate-limit hard, so descriptions are the
+      # listing's own qualifications/salary/work-model text, and `url` is the jobright job
+      # page (the employer's original link is hidden behind a jobright login).
+      # posted_at = listing `postedAt` (ms epoch). ~670 jobs, 14 pages at 50.
+      category: newgrad:us:creatives_design
+      max_pages: 20
   - key: google
     company: Google
     adapter: stealth_html

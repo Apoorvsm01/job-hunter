@@ -109,7 +109,7 @@ ranked `SearchResult` JSON.
   `html_multi_index.py`, `discovered_api.py`, `stealth_html.py`, `adp_recruiting.py`, `apple.py`,
   `eightfold.py`, `successfactors_rmk_v2.py`, `bosch.py`, `zf.py`, `csod.py`, `icims_attract.py`,
   `dayforce.py`, `smartrecruiters.py`, `paycom.py`, `paylocity.py`, `ultipro.py`, `brose.py`,
-  `ycombinator.py`), registered in
+  `ycombinator.py`, `jobright_minisite.py`), registered in
   `adapters/__init__.py`'s `ADAPTERS` dict, selected via `companies.yaml`'s `adapter` key. All
   inherit `JobAdapter` (`adapters/base.py`): retry-with-backoff `request()` (429/500/502/503/504 +
   network/timeout, honors `Retry-After`), default `healthcheck()`. Adapters implement

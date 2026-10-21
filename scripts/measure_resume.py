@@ -118,6 +118,7 @@ def measure(html_path: Path, pdf_output: Path | None = None, target_pages: float
                 path=pdf_path, format="Letter",
                 margin={"top": "0.5in", "bottom": "0.5in", "left": "0.5in", "right": "0.5in"},
                 print_background=True,
+                tagged=True,  # structure tags help accessibility tools and some ATS parsers
             )
             browser.close()
     except Exception as exc:  # noqa: BLE001 - Playwright raises its own Error type

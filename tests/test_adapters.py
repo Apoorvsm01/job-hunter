@@ -2629,3 +2629,44 @@ async def test_html_placeholder_without_the_setting_is_still_a_schema_error():
     async with httpx.AsyncClient() as client:
         with pytest.raises(SchemaError):
             await HtmlPaginatedAdapter(company, client, CollectionConfig(max_retries=0)).fetch_summaries()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_jobright_minisite_pages_by_offset_and_sets_company_per_job():
+    """newgrad-jobs.com's jobright API pages by `position` offset and names each job's own
+    employer; descriptions come from the listing, with no per-job request."""
+    from job_hunter.adapters.jobright_minisite import JobrightMinisiteAdapter
+
+    def item(job_id, title, company, posted_ms):
+        return {
+            "jobId": job_id, "postedAt": posted_ms,
+            "properties": {"title": title, "company": company, "location": "Seattle, WA",
+                           "salary": "$81000-$141700/yr", "workModel": "On Site",
+                           "industry": ["Software"], "qualifications": "1. 1+ years of design experience"},
+        }
+
+    route = respx.post("https://jobright.ai/swan/mini-sites/list")
+    route.side_effect = [
+        httpx.Response(200, json={"success": True, "result": {"total": 2, "jobList": [
+            item("aaa", "UX Designer I", "Acme Corp", 1791366472000)]}}),
+        httpx.Response(200, json={"success": True, "result": {"total": 2, "jobList": [
+            item('"bbb"', "Product Designer", "Globex", 1791280072000)]}}),
+    ]
+    company = CompanyConfig(
+        key="newgrad_design", company="newgrad-jobs.com (Creatives and Design)",
+        adapter="jobright_minisite", config={"category": "newgrad:us:creatives_design", "max_pages": 5},
+    )
+    async with httpx.AsyncClient() as client:
+        adapter = JobrightMinisiteAdapter(company, client, CollectionConfig(max_retries=0))
+        jobs = await adapter.fetch_summaries()
+        detail = await adapter.fetch_detail(jobs[0])
+    assert [j.company for j in jobs] == ["Acme Corp", "Globex"]
+    assert [j.job_id for j in jobs] == ["aaa", "bbb"]
+    assert jobs[0].url == "https://jobright.ai/jobs/info/aaa"
+    assert jobs[0].posted_at.strftime("%Y-%m-%d") == "2026-10-07"
+    assert [c.request.url.params["position"] for c in route.calls] == ["0", "50"]
+    assert json.loads(route.calls[0].request.content) == {"category": "newgrad:us:creatives_design"}
+    assert "1+ years of design experience" in detail.description
+    assert "Salary: $81000-$141700/yr" in detail.description
+    assert len(route.calls) == 2
