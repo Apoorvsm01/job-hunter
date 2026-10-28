@@ -16,6 +16,7 @@ from .greenhouse import GreenhouseAdapter
 from .html_multi_index import HtmlMultiIndexAdapter
 from .html_paginated import HtmlPaginatedAdapter
 from .icims_attract import IcimsAttractAdapter
+from .jobright_minisite import JobrightMinisiteAdapter
 from .lever import LeverAdapter
 from .oracle_hcm import OracleHcmAdapter
 from .paycom import PaycomAdapter
@@ -28,6 +29,7 @@ from .successfactors_rmk_v2 import SuccessFactorsRmkV2Adapter
 from .ultipro import UltiProAdapter
 from .unsupported import UnsupportedAdapter
 from .workday import WorkdayAdapter
+from .ycombinator import YCombinatorAdapter
 from .zf import ZfAdapter
 
 AdapterType: TypeAlias = type[JobAdapter]
@@ -57,6 +59,8 @@ ADAPTERS: dict[str, AdapterType] = {
     "zf": ZfAdapter,
     "dayforce": DayforceAdapter,
     "icims_attract": IcimsAttractAdapter,
+    "ycombinator": YCombinatorAdapter,
+    "jobright_minisite": JobrightMinisiteAdapter,
     "unsupported": UnsupportedAdapter,
 }
 

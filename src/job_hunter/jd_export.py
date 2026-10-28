@@ -138,6 +138,20 @@ def render_jd_text(job: dict, description_text: str) -> str:
     return "\n\n".join(parts) + "\n"
 
 
+def write_numbered_text(directory: Path, base: str, text: str) -> tuple[Path, bool]:
+    """Write `<directory>/<base>.txt`, or reuse it when its content is identical; a *different*
+    existing file gets the next numbered name (`<base>_2.txt`, ...) and is never overwritten."""
+    number = 1
+    while True:
+        path = directory / (f"{base}.txt" if number == 1 else f"{base}_{number}.txt")
+        if not path.exists():
+            atomic_write_text(path, text)
+            return path, True
+        if path.read_text(encoding="utf-8") == text:
+            return path, False
+        number += 1
+
+
 def export_jd(
     storage: Storage, source_key: str, job_id: str, *, project_root: Path, output_root: Path,
     today: date,
@@ -155,17 +169,6 @@ def export_jd(
     text = render_jd_text(job, body)
     company = sanitize(job["company"], "Company")
     base = f"JD_{company}_{sanitize(_first_words(job['title']), 'Job')}_{today.isoformat()}"
-    directory = Path(output_root) / company
-    number = 1
-    while True:
-        path = directory / (f"{base}.txt" if number == 1 else f"{base}_{number}.txt")
-        if not path.exists():
-            atomic_write_text(path, text)
-            created = True
-            break
-        if path.read_text(encoding="utf-8") == text:
-            created = False
-            break
-        number += 1
+    path, created = write_numbered_text(Path(output_root) / company, base, text)
     relative = Path(os.path.relpath(path.resolve(), Path(project_root).resolve())).as_posix()
     return ExportResult(path.resolve(), relative, created, f"Use the resume-generator skill on {relative}")

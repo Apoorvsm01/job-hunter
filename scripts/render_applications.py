@@ -1,6 +1,6 @@
 """Render the live server's /applications page: every tracked application, sorted by status then
 applied date, with counts, days-since-applied and whether the posting is still open, closed, or
-removed (deleted by `cleanup`). Pure presentation of rows the server reads from SQLite — never
+removed (deleted by `cleanup`), or was added manually (`job-hunter add-application`). Pure presentation of rows the server reads from SQLite — never
 descriptions, never database paths. All text is HTML-escaped; embedded JSON is script-safe."""
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from typing import Any, Literal
 import render_radar
 from render_radar import _attr, _e, _json_for_script
 
+from job_hunter.models import MANUAL_SOURCE_KEY
 from job_hunter.theme import EMPTY, ResolvedTheme, load_applications_assets
 
 STATUS_ORDER = ("offer", "interviewing", "applied", "saved", "rejected", "withdrawn")
@@ -30,7 +31,11 @@ def days_since(applied_at: str | None, today: date) -> int | None:
         return None
 
 
-def posting_state(job_status: str | None) -> Literal["open", "closed", "removed"]:
+def posting_state(
+    job_status: str | None, source_key: str | None = None
+) -> Literal["open", "closed", "removed", "manual"]:
+    if source_key == MANUAL_SOURCE_KEY:
+        return "manual"  # never collected, so there is no posting state to report
     if job_status == "active":
         return "open"
     if job_status == "closed":
@@ -60,6 +65,13 @@ def _sort_key(app: dict[str, Any]) -> tuple[int, str, str]:
     return order, inverted, updated
 
 
+def _posting_text(posting: str) -> str:
+    return "Added manually" if posting == "manual" else f"Posting {posting}"
+
+
+REVIEWED_TAG = "[Apply Reviewed]"  # notes prefix: tailored resume + cover letter checked, ready to submit
+
+
 def _row_html(app: dict[str, Any], *, posting: str, today: date) -> str:
     status = app["status"]
     options = "".join(
@@ -81,8 +93,11 @@ def _row_html(app: dict[str, Any], *, posting: str, today: date) -> str:
         f'data-applied-at="{_attr(applied)}" data-posting="{posting}">'
         f'<div class="app-main"><a class="app-title" href="{_safe_href(app["url"])}" target="_blank" '
         f'rel="noopener">{_e(app["title"])}</a>'
-        f'<div class="app-sub">{meta} &middot; <span class="posting-{posting}">Posting {posting}</span></div></div>'
+        + ('<span class="app-reviewed">Apply Reviewed</span>'
+           if (app.get("notes") or "").lstrip().startswith(REVIEWED_TAG) else "")
+        + f'<div class="app-sub">{meta} &middot; <span class="posting-{posting}">{_posting_text(posting)}</span></div></div>'
         '<div class="app-controls">'
+        f'<a class="app-apply" href="{_safe_href(app["url"])}" target="_blank" rel="noopener">Apply</a>'
         f'<label>Status <select class="app-status">{options}</select></label>'
         f'<label>Applied <input type="date" class="app-date" value="{_attr(applied)}"{disabled}></label>'
         f'<span class="app-days">{_e(_days_text(status, applied or None, today))}</span>'
@@ -98,7 +113,8 @@ def render_applications_page(
 ) -> str:
     ordered = sorted(applications, key=_sort_key)
     rows = "".join(
-        _row_html(a, posting=posting_state(job_states.get(f"{a['source_key']}|{a['job_id']}")), today=today)
+        _row_html(a, posting=posting_state(job_states.get(f"{a['source_key']}|{a['job_id']}"), a["source_key"]),
+                 today=today)
         for a in ordered
     )
     counts = {s: 0 for s in _LIFECYCLE}

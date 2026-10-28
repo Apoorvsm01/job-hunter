@@ -629,3 +629,56 @@ def test_main_exits_cleanly_and_releases_the_lock_after_shutdown(tmp_path, monke
     assert "Stopping." in capsys.readouterr().out
     with run_lock("radar-server"):  # lock was released
         pass
+
+
+# --- cold-outreach targets (/targets, POST /api/target) -----------------------------------------
+
+def _write_targets(root, rows):
+    directory = root / "data" / "targets"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "t.json").write_text(json.dumps({"targets": rows}))
+
+
+def _target_row(key="acme-health", rank=1, **over):
+    row = {
+        "rank": rank, "key": key, "company": "Acme Health", "industries": "Digital Health",
+        "website": "acme.example", "description": "Voice AI <b>for</b> clinics.",
+        "contact": {"first_name": "Jane", "last_name": "Doe", "title": "CEO", "email": "jane@example.com",
+                    "linkedin": "javascript:alert(1)"},
+        "score": 90, "fit": "Voice.", "lead_story": "timing_perception", "chicago": True,
+    }
+    row.update(over)
+    return row
+
+
+def test_targets_page_lists_ranked_rows_escaped_with_safe_links(jd_env):
+    _write_targets(jd_env.root, [_target_row()])
+    status, _, html = jd_env.request("GET", "/targets")
+    assert status == 200 and "Acme Health" in html and 'data-key="acme-health"' in html
+    assert "Voice AI &lt;b&gt;for&lt;/b&gt; clinics." in html and "<b>for</b>" not in html
+    assert 'href="https://acme.example"' in html and "javascript:" not in html
+
+
+def test_targets_page_without_files_is_an_empty_state(jd_env):
+    status, _, html = jd_env.request("GET", "/targets")
+    assert status == 200 and "No targets yet" in html
+
+
+def test_target_post_exports_a_brief_and_returns_the_prompt(jd_env):
+    _write_targets(jd_env.root, [_target_row()])
+    status, _, body = jd_env.request("POST", "/api/target", {"key": "acme-health", "kind": "cover"})
+    assert status == 200 and body["ok"] is True
+    assert body["path"].startswith("data/output/Acme_Health/JD_Acme_Health_Product_Designer_")
+    assert body["prompt"].startswith("Use the outreach-writer skill on ") and str(jd_env.root) not in json.dumps(body)
+    assert (jd_env.root / body["path"]).read_text(encoding="utf-8").startswith("Product Designer\n")
+
+
+def test_target_post_rejects_unknown_keys_bad_kinds_and_extra_fields(jd_env):
+    _write_targets(jd_env.root, [_target_row()])
+    assert jd_env.request("POST", "/api/target", {"key": "nope", "kind": "resume"})[0] == 404
+    assert jd_env.request("POST", "/api/target", {"key": "acme-health", "kind": "email"})[0] == 400
+    assert jd_env.request("POST", "/api/target", {"key": "acme-health", "kind": "resume", "path": "/x"})[0] == 400
+
+
+def test_radar_live_bar_links_to_targets(env):
+    assert 'href="/targets"' in env.request("GET", "/")[2]

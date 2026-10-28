@@ -129,6 +129,13 @@ def test_template_tokens_in_titles_and_notes_render_literally():
     assert html.count("<script") == 4
 
 
+def test_manual_application_shows_added_manually_not_removed():
+    html = _page([_app("era-design-engineer", source_key="manual", score=None, location=None)])
+    assert posting_state(None, "manual") == "manual"
+    assert 'data-posting="manual"' in html and "Added manually" in html
+    assert "Posting removed" not in html
+
+
 _APPS_GOLDEN = Path(__file__).parent / "fixtures" / "applications_static_golden.html"
 
 
@@ -191,3 +198,10 @@ def test_themed_applications_page_carries_the_inbox_layer_once():
 def test_auto_applications_page_has_no_inbox_layer():
     page = _page(_golden_apps(), states={"acme|1": "active", "acme|2": "closed"})
     assert "Inbox: Offers Incoming" not in page and "mf-badge" not in page
+
+
+def test_apply_reviewed_notes_prefix_shows_a_badge_only_when_tagged():
+    tagged = _page([_app(notes="[Apply Reviewed] Resume and cover letter ready")])
+    plain = _page([_app(notes="Mentions Apply Reviewed later, not as a prefix")])
+    assert '<span class="app-reviewed">Apply Reviewed</span>' in tagged
+    assert 'class="app-reviewed"' not in plain

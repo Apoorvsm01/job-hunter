@@ -19,6 +19,13 @@ Usage:
     uv run job-hunter search --json --output data/latest_search.json   # if not already run
     uv run python scripts/review_with_lm_studio.py
     uv run python scripts/assessments_to_csv.py                        # human-readable view
+
+Alternative engine: `--export-pending PATH` skips the local model entirely and writes the
+resolved resume/rubric/pending-candidate set to PATH instead, for a caller that wants a
+*different* scorer (the `job-reviewer` skill's "Claude engine" mode: the calling agent scores
+each candidate itself, spending the user's own Claude usage instead of a local model, then
+persists each verdict via `job-hunter record-assessment`). Same cache/partition rule either way,
+so the two engines can never disagree about what's already reviewed.
 """
 
 from __future__ import annotations
@@ -143,6 +150,26 @@ def _extract_json(text: str) -> dict[str, Any]:
     return json.loads(match.group(0))
 
 
+def _clean_description(description: str) -> str:
+    """Trim legal, EEO, and pay transparency boilerplate footers from description to reduce
+    prompt tokens and prevent model timeouts."""
+    if not description:
+        return "(no description available)"
+    patterns = [
+        r"(?i)\n\s*(equal (employment )?opportunity|eeo\b|e-verify|affirmative action).*",
+        r"(?i)\n\s*(pay transparency|base pay range|compensation range|salary range:).*",
+        r"(?i)\n\s*(reasonable accommodation|disability accommodation).*",
+        r"(?i)\n\s*(our benefits|benefits offered|benefits package).*",
+    ]
+    cleaned = description
+    for pat in patterns:
+        cleaned = re.split(pat, cleaned, maxsplit=1)[0]
+    cleaned = cleaned.strip()
+    if len(cleaned) > 4000:
+        cleaned = cleaned[:4000] + "\n...(truncated description for brevity)"
+    return cleaned or description[:4000]
+
+
 def review_one(
     client: httpx.Client,
     config: dict[str, Any],
@@ -157,34 +184,51 @@ def review_one(
     threshold: int = 75,
 ) -> dict[str, Any]:
     """Send exactly one job to the local model and return its parsed, validated verdict."""
-    response = client.post(
-        f"{config['base_url'].rstrip('/')}/chat/completions",
-        json={
-            "model": config.get("model", "local-model"),
-            "temperature": config.get("temperature", 0.2),
-            "messages": [
-                {
-                    "role": "system",
-                    "content": _SYSTEM_PROMPT.format(rubric=rubric, threshold=threshold),
-                },
-                {
-                    "role": "user",
-                    "content": _USER_PROMPT.format(
-                        resume=resume,
-                        title=title,
-                        company=company,
-                        location=location,
-                        url=url,
-                        description=description or "(no description available)",
-                    ),
-                },
-            ],
-        },
-        timeout=config.get("timeout_seconds", 180),
-    )
+    clean_desc = _clean_description(description)
+    timeout_sec = config.get("timeout_seconds", 180)
+    payload = {
+        "model": config.get("model", "local-model"),
+        "temperature": config.get("temperature", 0.2),
+        "messages": [
+            {
+                "role": "system",
+                "content": _SYSTEM_PROMPT.format(rubric=rubric, threshold=threshold),
+            },
+            {
+                "role": "user",
+                "content": _USER_PROMPT.format(
+                    resume=resume,
+                    title=title,
+                    company=company,
+                    location=location,
+                    url=url,
+                    description=clean_desc,
+                ),
+            },
+        ],
+    }
+    url_endpoint = f"{config['base_url'].rstrip('/')}/chat/completions"
+    try:
+        response = client.post(url_endpoint, json=payload, timeout=timeout_sec)
+    except httpx.TimeoutException:
+        # Retry once with shorter context
+        payload["messages"][1]["content"] = _USER_PROMPT.format(
+            resume=resume,
+            title=title,
+            company=company,
+            location=location,
+            url=url,
+            description=clean_desc[:2000] + "\n...(truncated)",
+        )
+        response = client.post(url_endpoint, json=payload, timeout=timeout_sec)
+
     response.raise_for_status()
     content = response.json()["choices"][0]["message"]["content"]
     raw_verdict = _extract_json(content)
+    if isinstance(raw_verdict.get("matches"), list) and len(raw_verdict["matches"]) > 4:
+        raw_verdict["matches"] = raw_verdict["matches"][:4]
+    if isinstance(raw_verdict.get("gaps"), list) and len(raw_verdict["gaps"]) > 3:
+        raw_verdict["gaps"] = raw_verdict["gaps"][:3]
     try:
         verdict = ModelVerdict.model_validate(raw_verdict)
     except ValidationError as exc:
@@ -266,6 +310,23 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--export-pending",
+        type=Path,
+        default=None,
+        help=(
+            "write the resolved resume, rubric, threshold, and every not-yet-cached candidate "
+            "(same set --status counts, same partition_candidates_for_review() cache rule) to "
+            "this JSON path, then exit — no LM Studio connectivity check, no model call, no "
+            "network at all. This is the hand-off point for an alternative scoring engine (the "
+            "calling agent itself, i.e. a `job-reviewer` 'Claude engine' run instead of the "
+            "default local-model one): the agent reads this file, scores each candidate itself "
+            "against the same rubric this script would have sent to the local model, and persists "
+            "each verdict via `job-hunter record-assessment` as it goes — same storage, same "
+            "content_hash-keyed caching, same resumability, just a different scorer. Respects "
+            "--force/--limit identically to a real run."
+        ),
+    )
+    parser.add_argument(
         "--result-json",
         type=Path,
         default=None,
@@ -343,6 +404,38 @@ def main() -> int:
         print(
             f"{args.input}: {len(to_review)} remaining, {skipped_cached} already cached, "
             f"{len(candidates)} total U.S.-eligible candidates. No model calls made."
+        )
+        return 0
+
+    if args.export_pending is not None:
+        payload = {
+            "input": str(args.input),
+            "resume_path": str(profile.resume_path),
+            "resume": resume,
+            "rubric": rubric,
+            "threshold": profile.minimum_recommendation_score,
+            "skipped_cached": skipped_cached,
+            "candidates": [
+                {
+                    "source_key": c["source_key"],
+                    "job_id": c["job_id"],
+                    "company": c["company"],
+                    "title": c["title"],
+                    "location": c.get("location_raw") or "",
+                    "url": c["url"],
+                    "description": _clean_description(c.get("description") or ""),
+                }
+                for c in to_review
+            ],
+        }
+        args.export_pending.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(
+            args.export_pending, json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+        )
+        print(
+            f"Exported {len(to_review)} pending candidate(s) to {args.export_pending} "
+            f"({skipped_cached} already cached, skipped). No model calls made, no LM Studio "
+            "connectivity required."
         )
         return 0
 

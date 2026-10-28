@@ -5,9 +5,10 @@ import asyncio
 import importlib.util
 import json
 import os
+import re
 import socket
 import sys
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +23,14 @@ from .collector import Collector, select_companies
 from .config import contact_problems, load_companies, load_profile, load_settings
 from .jd_export import JobHasNoDescription, JobNotFound, export_jd
 from .logging_config import configure_logging
-from .models import PIPELINE_NON_SUCCESS_STATUSES, Assessment, PipelineStatus, format_search_summary
+from .models import (
+    MANUAL_SOURCE_KEY,
+    PIPELINE_NON_SUCCESS_STATUSES,
+    ApplicationStatus,
+    Assessment,
+    PipelineStatus,
+    format_search_summary,
+)
 from .pipeline import latest_run_id, read_manifest, run_pipeline
 from .rootutil import add_project_argument, chdir_to_project_root, nonneg_int
 from .runlock import RunLockHeld, pid_alive, process_start_time
@@ -104,6 +112,23 @@ def parser() -> argparse.ArgumentParser:
     sub.add_parser("export-assessments")
     sub.add_parser("export-feedback")
     sub.add_parser("export-applications")
+    add_app = sub.add_parser(
+        "add-application",
+        help="track an application to a posting job-hunter never collected (source_key 'manual')",
+    )
+    add_app.add_argument("--company", required=True)
+    add_app.add_argument("--title", required=True)
+    add_app.add_argument("--url", required=True, help="posting link (http/https)")
+    add_app.add_argument(
+        "--status", choices=[s.value for s in ApplicationStatus], default=ApplicationStatus.APPLIED.value
+    )
+    add_app.add_argument("--applied-at", type=date.fromisoformat, default=None, help="YYYY-MM-DD")
+    add_app.add_argument("--notes", default=None)
+    add_app.add_argument("--location", default=None)
+    add_app.add_argument(
+        "--job-id", default=None,
+        help="stable id for this entry (default: slug of company + title; re-running updates it)",
+    )
     sub.add_parser("contact")
     export_jd_cmd = sub.add_parser("export-jd")
     export_jd_cmd.add_argument("source_key")
@@ -487,6 +512,43 @@ def doctor() -> int:
     return 0 if all(ok for _, ok, _ in checks) else 1
 
 
+def _manual_job_id(company: str, title: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", f"{company} {title}".lower()).strip("-")
+    return slug[:200] or "application"
+
+
+def _add_application(args: argparse.Namespace, settings: Any) -> int:
+    """Create (or update, keyed on `--job-id`) one manually-tracked application. The snapshot
+    comes from the arguments because there is no `jobs` row to take it from."""
+    if not args.url.lower().startswith(("http://", "https://")):
+        print("job-hunter: --url must start with http:// or https://", file=sys.stderr)
+        return 2
+    job_id = args.job_id or _manual_job_id(args.company, args.title)
+    changes: dict[str, Any] = {"status": ApplicationStatus(args.status)}
+    if args.applied_at is not None:
+        changes["applied_at"] = args.applied_at
+    if args.notes is not None:
+        changes["notes"] = args.notes
+    snapshot = {
+        "company": args.company, "title": args.title, "url": args.url, "location_raw": args.location,
+        "posted_at": None, "score": None, "salary_evidence": None,
+    }
+    with Storage(settings.database_path) as storage:
+        try:
+            outcome, row = storage.apply_application(
+                MANUAL_SOURCE_KEY, job_id, event_at=datetime.now(UTC), changes=changes,
+                snapshot=snapshot, today=date.today(),
+            )
+        except ValueError as exc:
+            message = str(exc).strip().splitlines()[0] if str(exc).strip() else "invalid application"
+            print(f"job-hunter: {message}", file=sys.stderr)
+            return 2
+        rows = storage.export_applications()
+    write_applications_exports(settings.database_path.parent, rows)
+    print(_json({"outcome": outcome, "item": row}))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
@@ -516,6 +578,8 @@ def main(argv: list[str] | None = None) -> int:
             write_applications_exports(settings.database_path.parent, rows)
             print(_json(rows))
             return 0
+        if args.command == "add-application":
+            return _add_application(args, settings)
         if args.command == "contact":
             try:
                 contact = load_profile().contact

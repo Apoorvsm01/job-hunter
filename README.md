@@ -89,6 +89,9 @@ saved job description.
   letter that uses the same folder and the same facts.
 - **One click from the radar.** Hit **Resume** on any job: the JD is saved and a ready-to-paste prompt lands on
   your clipboard.
+- **One click from any job page.** The companion browser extension, *Just Fill it!* (Chrome and Safari, its
+  own repo next to this one), turns the posting you're on into a tailored resume or cover letter and drops the
+  PDF into the application form.
 - **No invented facts.** Nothing is fabricated, no made-up recipient names, and nothing that contradicts your
   master resume. Your tone and per-employer preferences live in a private personalization file.
 

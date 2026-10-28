@@ -27,6 +27,7 @@ front end** — a real job link, not a guess, is what reveals it:
 - OpenAI: marketing site genuinely Cloudflare-challenged, but the real ATS is Ashby (`jobs.ashbyhq.com/openai`, public posting API), zero-auth.
 - Anthropic: NOT on Ashby despite the obvious-looking URL (`jobs.ashbyhq.com/anthropic` 404s) — it's Greenhouse (`job-boards.greenhouse.io/anthropic`).
 - Roche: front end works fine unblocked, but each job's `applyUrl` points to a public Workday CXS API with the full global catalog vs. the front end's one-category-at-a-time view. A working front end isn't a reason to stop looking either.
+- YC (`workatastartup.com`): looked login-gated (bare `curl` gets 406/302, easy to mistake for needing `stealth_html`) — a real browser-shaped `Accept` header alone flips it to a clean unauthenticated 200. Its Inertia.js pages embed a full JSON snapshot in a `data-page` HTML attribute (same shape as Apple's hydration data, single `html.unescape` instead of Apple's double JS-string unescape) — no browser needed, and even the job-detail page is public; only "Apply" itself redirects to a YC account login. Also job-hunter's first true multi-employer aggregator: `company` comes from each job's own `companyName`, not the fixed `companies.yaml` entry (`ycombinator.py`'s adapter sets it per item — every other adapter sources `company` from config only, confirmed by reading `collector.py`/`base.py` before assuming a framework change was needed). Confirmed live that `?page=`, `?jobs_page=`, `?offset=`, `?cursor=`, `?after=`, `?p=`, `?limit=`, `?per_page=`, and `?query=` all return byte-identical results on this route — a real 200 with real job cards still isn't proof a param does anything (see Molex below); deeper results live behind a client-side search this adapter doesn't chase, so it honestly collects only the first page.
 
 Related trap: **an endpoint good for scraping isn't always safe to hand a human as `url`.** GM's
 Workday CXS API and Ford/DENSO's Oracle HCM REST API are JSON endpoints, not browsable pages —
@@ -107,7 +108,8 @@ ranked `SearchResult` JSON.
   `greenhouse.py`, `oracle_hcm.py`, `phenom.py`, `successfactors_rmk.py`, `html_paginated.py`,
   `html_multi_index.py`, `discovered_api.py`, `stealth_html.py`, `adp_recruiting.py`, `apple.py`,
   `eightfold.py`, `successfactors_rmk_v2.py`, `bosch.py`, `zf.py`, `csod.py`, `icims_attract.py`,
-  `dayforce.py`, `smartrecruiters.py`, `paycom.py`, `paylocity.py`, `ultipro.py`, `brose.py`), registered in
+  `dayforce.py`, `smartrecruiters.py`, `paycom.py`, `paylocity.py`, `ultipro.py`, `brose.py`,
+  `ycombinator.py`, `jobright_minisite.py`), registered in
   `adapters/__init__.py`'s `ADAPTERS` dict, selected via `companies.yaml`'s `adapter` key. All
   inherit `JobAdapter` (`adapters/base.py`): retry-with-backoff `request()` (429/500/502/503/504 +
   network/timeout, honors `Retry-After`), default `healthcheck()`. Adapters implement
@@ -264,6 +266,7 @@ ranked `SearchResult` JSON.
   for that one. See `skills/job-feedback/SKILL.md`.
 
 - **`scripts/serve_radar.py`** — opt-in localhost live radar: GET `/`, `/applications`, `/api/state`, `/api/feedback`, `/api/applications`; POST `/api/feedback`, `/api/application`, `/api/jd`, `/api/shutdown` (loopback-bind only, replies then stops via a short-lived thread; the radar page's Stop server button) (application snapshot fields derived server-side; every UI edit sends the full record; `applied_at` can't be cleared; unknown job → 404; 15 s handler timeout; feedback untag is idempotent). Loopback by default, unauthenticated. Opens a per-request `Storage`, holds `run_lock("radar-server")`, validates writes against `jobs` (the label is client-supplied and validated; company/title/department/score are derived server-side from the `jobs`/`assessments` tables), never renders on the write path, never writes `data/radar/`; `--project` supported. Live saves don't refresh `data/job_feedback.json`/`.csv`, but each committed application write refreshes `data/applications.json`/`.csv` (`applications_export.py`'s `write_applications_exports`; CSV formula guard prefixes `'` on cells starting `= + - @` tab/CR); a refresh failure surfaces as `export_warning` and never fails or reverts the save. `scripts/render_applications.py` renders `/applications`; `scripts/templates/radar_live_sync.js` is the shared node-tested outbox engine (`tests/js/`) used by both live pages. The unsent-writes outbox is one shared localStorage key (`job-hunter-outbox`); with the server down and two tabs open, an unsent edit in one tab can overwrite the other tab's stored entry (each tab still retries its own from memory; the event-time rule makes duplicate sends harmless).
+- **Cold-outreach targets** (`src/job_hunter/targets.py`, `scripts/render_targets.py`, `/targets` + `POST /api/target` in `serve_radar.py`) — ranked companies with no posting, loaded from `data/targets/*.json` (git-ignored; third-party contact emails live there) and shown on the live radar's Targets page. Each row's Resume / Cold email button writes a targeting brief to `data/output/<Company>/JD_<Company>_Product_Designer_<date>.txt` (first line is the role, so `resume-files --jd` works unchanged) and copies the matching skill prompt (`resume-generator`, or `outreach-writer` as a hyper-personalized cold email that must research the company first). Python never writes the resume or letter; rank/score/fit text is whatever the JSON says (judgment, not measured). Reads no SQLite, so it works with an empty database.
 - **`src/job_hunter/theme.py`** (+ `scripts/templates/themes/`) — opt-in `forest`/`forest-dawn` page
   themes chosen by `settings.radar.theme` (`render_radar.py --theme` overrides). Pure resolver: `auto`
   returns empty strings so default pages stay byte-identical (the radar and Applications goldens
@@ -425,7 +428,7 @@ ranked `SearchResult` JSON.
   snapshot of company/title/url/location/posted_at/score/salary_evidence taken once at creation)
   and `application_tombstones` follow the same last-writer-wins-by-event-time rule through
   `Storage.apply_application`. No foreign key to `jobs`, so `cleanup` never deletes them (a
-  cleaned-up posting shows as "removed" on `/applications`). Written only by `serve_radar.py`;
+  cleaned-up posting shows as "removed" on `/applications`). Written by `serve_radar.py`, and by `job-hunter add-application` for postings never collected (`source_key` `manual`, caller-supplied snapshot, shown as "Added manually");
   `job-hunter export-applications` rewrites the JSON/CSV exports.
 
   A job is marked `closed` after 3 consecutive runs missing from a healthy source's listing
@@ -483,6 +486,13 @@ ranked `SearchResult` JSON.
   (skips with no real profile; `JOB_HUNTER_PII_SKIP_SURNAME=1` skips only the surname check).
   `tests/test_skills_portable.py` guards all user-facing skills against employer/domain examples and PII.
 
+- **Browser extension: moved out.** The one-click resume/cover-letter extension ("Just Fill it!", Chrome +
+  Safari) and its local helper now live in their own repo, `../auto_apply_extension`, and use job-hunter as a
+  path dependency (it imports `jd_export`, `config`, `resume_source`, `atomic`, `rootutil`, `runlock`,
+  `applications_export`; keep those APIs stable or update it too). It reads `config/resume/*` and writes
+  `data/output/<Company>/` and `data/output/resume_log.csv` here; its token and drafts stay in its own repo.
+  `jd_export.write_numbered_text` was extracted for it (also used by `export_jd`).
+
 - **`health.py`** — `detect_count_anomaly` flags (doesn't fail) a source whose job count drops
   >70% from its last known *non-zero* count (`source_health.last_nonzero_job_count`, migration v5) —
   guards against adapters "succeeding" against a changed page structure while returning far
@@ -507,13 +517,31 @@ ranked `SearchResult` JSON.
   calculator; the skill supplies market/cost-of-living research and writing, never the arithmetic).
   Each `SKILL.md` is the canonical procedure for its stage: run the collector, read only
   `candidates`, never recommend `us_eligible=false`, never invent salary/sponsorship/
-  qualifications. Scoring is delegated entirely to `scripts/review_with_lm_studio.py`
-  (deterministic script, not a sub-agent) — sends each unassessed candidate to a **local** LM
-  Studio model, one at a time, strictly sequential, zero cloud tokens; the calling agent just runs
-  it then reads `data/assessments.json`/`export-assessments`. Persists each verdict immediately,
-  so an interrupted run resumes by re-invoking with the same `--keyword`/`--input`.
-  `job-reviewer/references/scoring.md` defines the rubric; `job-scout/references/
-  troubleshooting.md` covers source-health diagnosis.
+  qualifications. Scoring has two interchangeable engines, chosen per invocation (`job-reviewer`'s
+  SKILL.md "Engine choice" — ask the user every time unless their request already names one, never
+  default silently): **LM Studio** (default) delegates entirely to `scripts/review_with_lm_studio.py`
+  (deterministic script, not a sub-agent) — sends each unassessed candidate to a **local** model,
+  one at a time, strictly sequential, zero cloud tokens. **Claude** (opt-in) has the calling agent
+  score each candidate itself, spending the user's own Claude usage instead — added because a local
+  model isn't always available/wanted, not a replacement for the default. Both write through the
+  identical `content_hash`-keyed `assessments` store via `job-hunter record-assessment` (the LM
+  Studio script calls it internally; the Claude path calls it directly per job), so reviewing part
+  of a batch with one engine and finishing with the other is safe and expected — the two can never
+  disagree about what's already scored. `review_with_lm_studio.py --export-pending PATH` is the
+  hand-off primitive: it resolves resume/rubric/pending-candidates exactly as a real run would, with
+  zero network calls and no LM Studio dependency, so the Claude path shares 100% of the same
+  cache/partition/resume-resolution logic rather than a parallel reimplementation that could drift.
+  `job-hunter pipeline` (Python-owned) has no `--engine` flag — its review stage is hardwired to the
+  LM Studio subprocess — so a Claude-engine full-pipeline run takes a different shape (`pipeline
+  --skip-review --skip-radar` for search, `job-reviewer`'s Claude procedure to score, then a direct
+  `render_radar.py` call), not just a different flag on the same command; see `job-hunter/SKILL.md`
+  Path A vs. Path B. The calling agent reads `data/assessments.json`/`export-assessments`
+  afterward either way. Persists each verdict immediately, so an interrupted run resumes by
+  re-invoking with the same `--keyword`/`--input` regardless of which engine scored what so far.
+  `job-reviewer/references/scoring.md` defines the rubric (embedded verbatim in the LM Studio
+  script's prompt and read directly off `--export-pending`'s output for the Claude path — one
+  rubric file, never two copies to keep in sync); `job-scout/references/troubleshooting.md` covers
+  source-health diagnosis.
 
   When a review run reports `model_unavailable`, run `scripts/check_lm_studio.py` before
   concluding LM Studio itself is down — an agent runtime (Hermes) can misreport this when the real
