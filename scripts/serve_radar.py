@@ -34,10 +34,11 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import render_applications
 import render_radar
+import render_targets
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from job_hunter.applications_export import write_applications_exports
@@ -48,6 +49,7 @@ from job_hunter.rootutil import add_project_argument, chdir_to_project_root
 from job_hunter.runlock import RunLockHeld, run_lock
 from job_hunter.search_archive import resolve_search_path
 from job_hunter.storage import Storage
+from job_hunter.targets import TargetNotFound, export_target_brief, find_target, load_targets
 
 MAX_BODY_BYTES = 64 * 1024
 MAX_DRAIN_BYTES = 1024 * 1024  # read-and-discard cap so early rejections never leave unread bytes
@@ -158,6 +160,15 @@ class ShutdownRequest(BaseModel):
 
 class JdExport(_JobKey):
     """Only the two identifiers: the JD text always comes from the database, never the browser."""
+
+
+class TargetBrief(BaseModel):
+    """A cold-outreach target by key; the brief text always comes from data/targets/, never the browser."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: str = Field(min_length=1, max_length=200)
+    kind: Literal["resume", "cover"]
 
 
 class FeedbackWrite(_KeyedWrite):
@@ -344,9 +355,30 @@ def write_jd(
     return 200, {"ok": True, "path": result.relative_path, "created": result.created, "prompt": result.prompt}
 
 
+def write_target_brief(
+    req: TargetBrief, *, targets_dir: Path, project_root: Path, output_root: Path, today: date
+) -> tuple[int, dict[str, Any]]:
+    """Export one target's brief file and return the prompt for the matching skill (no database use)."""
+    try:
+        target = find_target(load_targets(targets_dir), req.key)
+    except TargetNotFound:
+        return 404, {"ok": False, "error": "unknown target"}
+    except Exception as exc:  # noqa: BLE001 - a malformed targets file must not leak paths
+        print(f"target load failed: {type(exc).__name__}", file=sys.stderr)
+        return 500, {"ok": False, "error": "internal error"}
+    try:
+        result = export_target_brief(
+            target, req.kind, project_root=project_root, output_root=output_root, today=today
+        )
+    except Exception as exc:  # noqa: BLE001 - OSError text can carry absolute paths
+        print(f"target brief export failed: {type(exc).__name__}", file=sys.stderr)
+        return 500, {"ok": False, "error": "internal error"}
+    return 200, {"ok": True, "path": result.relative_path, "created": result.created, "prompt": result.prompt}
+
+
 _POST_ROUTES = {
     "/api/feedback": FeedbackWrite, "/api/application": ApplicationWrite, "/api/jd": JdExport,
-    "/api/shutdown": ShutdownRequest,
+    "/api/target": TargetBrief, "/api/shutdown": ShutdownRequest,
 }
 
 
@@ -451,6 +483,9 @@ class RadarHandler(BaseHTTPRequestHandler):
                 self._json(200, {"ok": True, "feedback": {k: _public_feedback(v) for k, v in mapping.items()}})
             elif path == "/applications":
                 self._send(200, render_applications_html(cfg).encode("utf-8"), "text/html; charset=utf-8")
+            elif path == "/targets":
+                targets = load_targets(cfg.settings.database_path.parent / "targets")
+                self._send(200, render_targets.render_targets_page(targets).encode("utf-8"), "text/html; charset=utf-8")
             elif path == "/api/applications":
                 with Storage(cfg.settings.database_path) as storage:
                     mapping = storage.application_map()
@@ -510,6 +545,17 @@ class RadarHandler(BaseHTTPRequestHandler):
                 self._json(200, {"ok": True})  # reply first; the response is on the wire before we stop
             finally:
                 self.server.request_shutdown()
+            return
+        if isinstance(req, TargetBrief):
+            try:
+                data_dir = self.server.cfg.settings.database_path.parent
+                status, response = write_target_brief(
+                    req, targets_dir=data_dir / "targets", project_root=Path.cwd(),
+                    output_root=data_dir / "output", today=date.today(),
+                )
+                self._json(status, response)
+            except Exception as exc:  # noqa: BLE001
+                self._fail(exc)
             return
         try:
             with Storage(self.server.cfg.settings.database_path) as storage:

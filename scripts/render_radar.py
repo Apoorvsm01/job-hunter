@@ -779,6 +779,7 @@ def _live_bar_html(live_state: LiveState, sources: str) -> str:
     return (
         '<div class="live-bar">'
         '<a class="live-link" href="/applications">Applications</a>'
+        '<a class="live-link" href="/targets">Targets</a>'
         '<span id="live-status" class="live-pill" role="status" data-state="live">Live</span>'
         '<button type="button" id="live-stop" class="live-stop">Stop server</button>'
         '<span id="live-notice" class="live-notice" role="alert"></span>'

@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cold-outreach targets</title>
+<style>
+  :root {
+    --paper: #F3F6F7; --ink: #14191F; --ink-soft: #4B5560; --surface: #FFFFFF; --line: #DCE3E7;
+    --accent: #0C7F91; --accent-soft: #E4F1F3; --muted: #6B7480; --status-good: #1D9A66;
+    --shadow: 0 1px 2px rgba(20, 25, 31, 0.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #10151A; --ink: #E9EDEF; --ink-soft: #A6B0B8; --surface: #171E24; --line: #2A333A;
+      --accent: #3FC1D4; --accent-soft: #17323A; --muted: #8A95A0; --status-good: #3FCC8C;
+      --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--paper); color: var(--ink); font: 15px/1.5 "IBM Plex Sans", system-ui, sans-serif; }
+  main { max-width: 1000px; margin: 0 auto; padding: 32px 16px 96px; }
+  h1 { margin: 0 0 4px; font-size: 28px; }
+  .app-nav a { color: var(--accent); font-weight: 600; text-decoration: none; }
+  .subhead { color: var(--ink-soft); margin: 0 0 16px; }
+  .toolbar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin: 0 0 20px; }
+  .toolbar input[type="search"] { font: inherit; padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: inherit; min-width: 240px; }
+  .toolbar label { font-size: 13px; color: var(--ink-soft); }
+  .t-row { display: grid; grid-template-columns: 56px 1fr; gap: 14px; padding: 14px 16px; margin-bottom: 10px; background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 10px; box-shadow: var(--shadow); }
+  .t-rank { text-align: center; }
+  .t-rank b { display: block; font-size: 22px; line-height: 1.1; }
+  .t-rank span { font-size: 12px; color: var(--muted); }
+  .t-name { font-weight: 600; font-size: 17px; color: var(--ink); text-decoration: none; }
+  .t-name:hover { color: var(--accent); }
+  .t-tag { display: inline-block; margin-left: 8px; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; color: var(--status-good); border: 1px solid var(--status-good); vertical-align: middle; }
+  .t-sub { color: var(--muted); font-size: 13px; }
+  .t-desc { margin: 6px 0 4px; }
+  .t-fit { margin: 0 0 8px; padding: 6px 10px; background: var(--accent-soft); border-radius: 8px; font-size: 14px; }
+  .t-contact { font-size: 13px; color: var(--ink-soft); }
+  .t-contact a { color: var(--accent); }
+  .t-actions { display: flex; gap: 8px; margin-top: 10px; }
+  .t-btn { font: inherit; font-size: 13px; font-weight: 600; padding: 6px 14px; border-radius: 8px; border: 1px solid var(--accent); background: var(--accent); color: var(--paper); cursor: pointer; }
+  .t-btn.secondary { background: transparent; color: var(--accent); }
+  .t-btn:disabled { opacity: 0.6; cursor: progress; }
+  .t-empty { color: var(--muted); padding: 24px 0; }
+  .live-bar { position: fixed; bottom: 24px; right: 24px; z-index: 10; display: flex; flex-direction: column; align-items: flex-end; gap: 6px; font-family: "IBM Plex Mono", monospace; font-size: 12px; }
+  .live-notice { padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); box-shadow: var(--shadow); max-width: 560px; }
+  .live-notice:empty { display: none; }
+</style>
+<main>
+  <p class="app-nav"><a href="/">&larr; Radar</a> &middot; <a href="/applications">Applications</a></p>
+  <h1>Cold-outreach targets</h1>
+  <p class="subhead">__SUBHEAD__</p>
+  <div class="toolbar">
+    <input type="search" id="t-search" placeholder="Filter by company or industry" aria-label="Filter targets">
+    <label><input type="checkbox" id="t-chicago"> Chicago only</label>
+  </div>
+  <p id="t-empty" class="t-empty"__EMPTY_HIDDEN__>No targets yet &mdash; put a ranked JSON file in <code>data/targets/</code>.</p>
+  <div id="t-rows">__ROWS__</div>
+</main>
+<div class="live-bar"><span id="t-notice" class="live-notice" role="status"></span></div>
+<script>
+(function () {
+  'use strict';
+  var notice = document.getElementById('t-notice');
+  var timer = null;
+  function say(text, ms) {
+    notice.textContent = text;
+    clearTimeout(timer);
+    timer = setTimeout(function () { notice.textContent = ''; }, ms || 8000);
+  }
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text).then(function () { return true; }, function () { return false; });
+    }
+    return Promise.resolve(false);
+  }
+  function applyFilter() {
+    var q = document.getElementById('t-search').value.trim().toLowerCase();
+    var chi = document.getElementById('t-chicago').checked;
+    Array.prototype.forEach.call(document.querySelectorAll('.t-row'), function (row) {
+      var ok = (!q || row.dataset.search.indexOf(q) !== -1) && (!chi || row.dataset.chicago === '1');
+      row.hidden = !ok;
+    });
+  }
+  document.getElementById('t-search').addEventListener('input', applyFilter);
+  document.getElementById('t-chicago').addEventListener('change', applyFilter);
+  document.addEventListener('click', function (evt) {
+    var btn = evt.target.closest ? evt.target.closest('.t-btn') : null;
+    if (!btn || btn.disabled) return;
+    var row = btn.closest('.t-row');
+    if (!row) return;
+    btn.disabled = true;
+    fetch('/api/target', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: row.dataset.key, kind: btn.dataset.kind })
+    }).then(function (res) {
+      return res.json().catch(function () { return null; }).then(function (json) { return { status: res.status, json: json }; });
+    }).then(function (res) {
+      if (res.status !== 200 || !res.json || typeof res.json.prompt !== 'string') {
+        say(res.status === 404 ? 'That target is no longer in data/targets/.' : 'Could not prepare it (HTTP ' + res.status + '); try again.');
+        return;
+      }
+      return copyText(res.json.prompt).then(function (copied) {
+        say(copied
+          ? 'Copied — paste it into Claude Code. Brief saved: ' + res.json.path
+          : 'Copy this and paste it into Claude Code: ' + res.json.prompt, copied ? 9000 : 40000);
+      });
+    }, function () { say('Could not reach the radar server; try again.'); })
+      .then(function () { btn.disabled = false; }, function () { btn.disabled = false; });
+  });
+})();
+</script>
