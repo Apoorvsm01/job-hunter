@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html as html_module
+import re
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 from selectolax.parser import HTMLParser
@@ -16,6 +17,7 @@ from ..normalizer import (
 )
 from .base import AdapterError, JobAdapter, SchemaError
 
+_CITY_STATE_ZIP = re.compile(r"^(.+?),?\s+([A-Z]{2})\s+\d{5}(?:-\d{4})?$")
 
 class HtmlPaginatedAdapter(JobAdapter):
     # Opt-in (StealthHtmlAdapter): a source behind a bot-management wall can return a blank or
@@ -92,6 +94,13 @@ class HtmlPaginatedAdapter(JobAdapter):
                 label = cfg.get("location_strip_prefix")
                 if location and label and location.startswith(label):
                     location = location[len(label):].strip() or None
+                # Opt-in (Nikon SLM's rexx board): a bare "City ST 12345" has no comma before
+                # the state, so location.py cannot see the abbreviation; rewrite it to
+                # "City, ST, USA" so the real U.S. posting is not rejected.
+                if location and cfg.get("location_us_state_zip"):
+                    zip_match = _CITY_STATE_ZIP.match(location)
+                    if zip_match:
+                        location = f"{zip_match.group(1)}, {zip_match.group(2)}, USA"
                 attr = cfg.get("id_attribute", "data-job-id")
                 job_id = card.attributes.get(attr) or fallback_job_id(
                     self.company.company, title, location, detail_url

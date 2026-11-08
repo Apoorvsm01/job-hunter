@@ -2323,3 +2323,44 @@ companies:
       page_parameter: startrow
       page_size: 25
       description_selector: .jobdescription
+  - key: stryker
+    company: Stryker
+    adapter: workday
+    platform: workday
+    config:
+      # careers.stryker.com/jobs is a branded front end; the sample job's own Apply link
+      # (stryker.wd1.myworkdayjobs.com/StrykerCareers/job/.../Robotics-Systems-Engineer_R576762)
+      # reveals the real backend: a public, unauthenticated Workday CXS API (no bot
+      # protection), ~1,450 jobs globally. Location_Country=United States of America
+      # (bc33aa31...) is a real filter, confirmed: it returns a different, U.S.-only set than
+      # India's id (c4f78be1...). location.py still decides eligibility. public_base_url is
+      # the native candidate-facing host, not the CXS JSON host (same reasoning as GM).
+      workday_native: true
+      list_url: https://stryker.wd1.myworkdayjobs.com/wday/cxs/stryker/StrykerCareers/jobs
+      public_base_url: https://stryker.wd1.myworkdayjobs.com/en-US/StrykerCareers/
+      applied_facets:
+        Location_Country:
+          - bc33aa3152ec42d4995f4791a106ed09
+  - key: nikon_slm
+    company: Nikon SLM Solutions
+    adapter: html_paginated
+    platform: rexx
+    config:
+      # careers-us.nikon-slm-solutions.com is a rexx systems career site: plain server-rendered
+      # HTML, no bot protection (confirmed with curl, no cookies). /job-offers.html lists every
+      # opening on one page (16 jobs, no pagination); each is an <article.joboffer_container>
+      # with the title link and a span.job_standort location ("Long Beach CA 90808"). The job id
+      # is the -jNNNN suffix in the URL, so job_id falls back to normalizer.fallback_job_id.
+      # Detail pages carry schema.org JobPosting JSON-LD (datePosted, employmentType, baseSalary,
+      # description), which html_paginated.fetch_detail reads automatically, so no posted_at
+      # selector is needed. Sample job j1725 (System Engineer, Long Beach CA, posted 2026-09-21)
+      # confirmed. Caveat: US site only; the global Nikon SLM site is a separate board.
+      list_url: https://careers-us.nikon-slm-solutions.com/job-offers.html
+      card_selector: article.joboffer_container
+      link_selector: a
+      title_selector: a
+      location_selector: span.job_standort
+      # Rows read "Long Beach CA 90808" (no comma before the state), which location.py
+      # rejected (8 of 16 real U.S. jobs); this opt-in rewrites it to "Long Beach, CA, USA".
+      location_us_state_zip: true
+      description_selector: ".job_description, body"

@@ -2393,6 +2393,33 @@ async def test_avature_cards_label_prefixed_location_and_date_with_joboffset_pag
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_html_paginated_rewrites_bare_city_state_zip_location_when_opted_in():
+    """Nikon SLM's rexx board writes "Long Beach CA 90808" (no comma before the state), which
+    location.py cannot read; `location_us_state_zip` rewrites only that shape to "City, ST, USA"."""
+    html = (
+        '<article class="joboffer_container"><a href="https://jobs.example/Engineer-j1.html">Engineer</a>'
+        '<span class="job_standort">Long Beach CA 90808</span></article>'
+        '<article class="joboffer_container"><a href="https://jobs.example/Tech-j2.html">Tech</a>'
+        '<span class="job_standort">Michigan, USA</span></article>'
+    )
+    respx.get("https://jobs.example/job-offers.html").mock(return_value=httpx.Response(200, text=html))
+    company = CompanyConfig(
+        key="nikon_slm", company="Nikon SLM Solutions", adapter="html_paginated",
+        config={
+            "list_url": "https://jobs.example/job-offers.html",
+            "card_selector": "article.joboffer_container",
+            "link_selector": "a", "title_selector": "a",
+            "location_selector": "span.job_standort",
+            "location_us_state_zip": True,
+        },
+    )
+    async with httpx.AsyncClient() as client:
+        jobs = await HtmlPaginatedAdapter(company, client, CollectionConfig(max_retries=0)).fetch_summaries()
+    assert [j.location_raw for j in jobs] == ["Long Beach, CA, USA", "Michigan, USA"]
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_apple_keeps_earlier_pages_when_a_later_batch_is_rate_limited():
     now = datetime.now(UTC)
 
