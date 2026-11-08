@@ -238,6 +238,69 @@ async def test_ashby_reads_structured_location_and_work_arrangement():
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_json_api_posts_configured_headers_and_payload():
+    """Vector's page calls an Azure Search index (POST .../search) whose static public key and
+    customerid ride in request headers; the kernel's opt-in `headers` config must send them."""
+    url = "https://api.example/search"
+    route = respx.post(url).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "value": [
+                    {
+                        "jobId": "632-en_GB",
+                        "title": "Project Engineer",
+                        "link": "https://example.com/invite/632",
+                        "datePosted": "2026-09-17T16:05:15Z",
+                        "country": "United States",
+                        "addresses": [{"city": "Detroit"}],
+                        "description": "<p>Do things.</p>",
+                    }
+                ]
+            },
+        )
+    )
+    company = CompanyConfig(
+        key="example",
+        company="Example",
+        adapter="discovered_api",
+        config={
+            "list_url": url,
+            "method": "POST",
+            "headers": {"x-api-key": "pk_test", "customerid": "example-prod"},
+            "payload": {"search": "*", "skip": 0},
+            "items_path": "value",
+            "public_url_template": "https://example.com/job/{id}",
+            "fields": {
+                "id": "jobId",
+                "title": "title",
+                "url": "link",
+                "location": "addresses.0.city",
+                "country": "country",
+                "posted_at": "datePosted",
+            },
+            "listing_description_path": "description",
+        },
+    )
+    async with httpx.AsyncClient() as client:
+        adapter = adapters_pkg.adapter_class("discovered_api")(
+            company, client, CollectionConfig(max_retries=0)
+        )
+        jobs = await adapter.fetch_summaries()
+        detail = await adapter.fetch_detail(jobs[0])
+    sent = route.calls.last.request
+    assert sent.headers["x-api-key"] == "pk_test"
+    assert sent.headers["customerid"] == "example-prod"
+    assert json.loads(sent.content) == {"search": "*", "skip": 0}
+    assert jobs[0].job_id == "632-en_GB"
+    assert jobs[0].url == "https://example.com/job/632-en_GB"
+    assert jobs[0].location_raw == "Detroit"
+    assert jobs[0].posted_at is not None
+    assert detail.description == "<p>Do things.</p>"
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_ashby_work_arrangement_unknown_when_not_configured():
     """work_arrangement is opt-in — a company config that doesn't map it must not crash
     or guess, same as any other unconfigured field."""
@@ -2326,6 +2389,33 @@ async def test_avature_cards_label_prefixed_location_and_date_with_joboffset_pag
     assert jobs[0].location_raw == "Bucharest - Bucharest, Romania"
     assert jobs[2].location_raw == "New York - USA - 19 West 44th St."
     assert [j.posted_at.strftime("%Y-%m-%d") for j in jobs] == ["2026-07-15", "2026-09-24", "2026-09-22"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_html_paginated_rewrites_bare_city_state_zip_location_when_opted_in():
+    """Nikon SLM's rexx board writes "Long Beach CA 90808" (no comma before the state), which
+    location.py cannot read; `location_us_state_zip` rewrites only that shape to "City, ST, USA"."""
+    html = (
+        '<article class="joboffer_container"><a href="https://jobs.example/Engineer-j1.html">Engineer</a>'
+        '<span class="job_standort">Long Beach CA 90808</span></article>'
+        '<article class="joboffer_container"><a href="https://jobs.example/Tech-j2.html">Tech</a>'
+        '<span class="job_standort">Michigan, USA</span></article>'
+    )
+    respx.get("https://jobs.example/job-offers.html").mock(return_value=httpx.Response(200, text=html))
+    company = CompanyConfig(
+        key="nikon_slm", company="Nikon SLM Solutions", adapter="html_paginated",
+        config={
+            "list_url": "https://jobs.example/job-offers.html",
+            "card_selector": "article.joboffer_container",
+            "link_selector": "a", "title_selector": "a",
+            "location_selector": "span.job_standort",
+            "location_us_state_zip": True,
+        },
+    )
+    async with httpx.AsyncClient() as client:
+        jobs = await HtmlPaginatedAdapter(company, client, CollectionConfig(max_retries=0)).fetch_summaries()
+    assert [j.location_raw for j in jobs] == ["Long Beach, CA, USA", "Michigan, USA"]
 
 
 @pytest.mark.asyncio
