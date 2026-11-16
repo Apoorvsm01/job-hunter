@@ -2,7 +2,7 @@ import json
 import os
 import re
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -1647,3 +1647,94 @@ def test_fallback_job_row_carries_a_per_company_stale_source_tag(tmp_path):
     expected_date = last_success.astimezone().strftime("%b %-d, %Y")
     assert ">Source stale</span>" in html
     assert f"Source failed to scrape today; last collected {expected_date}" in html
+
+
+def _dream_inputs(tmp_path):
+    search_path = tmp_path / "search.json"
+    search_path.write_text(json.dumps(_search_json([
+        _candidate("x", "1", title="Vehicle Calibration & Test Supervisor", company="Ford"),
+        _candidate("x", "2", title="Controls Engineer", company="Acme"),
+        _candidate("x", "3", title="Staff Perception Engineer", company="Acme"),  # never reviewed
+    ])))
+    assessments_path = tmp_path / "assessments.json"
+    assessments_path.write_text(json.dumps([
+        _assessment("x", "1", 80, title="Vehicle Calibration & Test Supervisor", company="Ford"),
+        _assessment("x", "2", 80, title="Controls Engineer"),
+    ]))
+    return dict(
+        search_path=search_path, assessments_path=assessments_path, title="t", keyword_label=None,
+        new_days=10, now=datetime(2026, 8, 31, tzinfo=UTC),
+    )
+
+
+def test_dream_tag_and_filter_only_when_configured(tmp_path):
+    from job_hunter.config import DreamConfig
+
+    cfg = DreamConfig(title_terms=["supervisor", "staff"], weak_title_terms=["engineer"])
+    html, _ = render(dream=cfg, **_dream_inputs(tmp_path))
+    assert html.count('tag tag-dream"') == 2  # scored supervisor row + never-reviewed staff row
+    assert 'title="title: supervisor"' in html and 'title="title: staff"' in html
+    assert html.count('data-dream="1"') == 2 and html.count('data-dream="0"') == 1
+    assert html.count("tag tag-dream-ish") == 1 and html.count('data-dream-ish="1"') == 1  # Controls Engineer
+    assert 'data-filter-value="dream-ish"' in html and "row.dataset.dreamIsh" in html
+    assert 'data-filter-value="dream"' in html and "row.dataset.dream" in html
+    assert "Controls Engineer" in html  # tag only, never a filter on what is listed
+
+
+def test_dream_off_leaves_no_trace(tmp_path):
+    from job_hunter.config import DreamConfig
+
+    inputs = _dream_inputs(tmp_path)
+    plain, _ = render(**inputs)
+    empty, _ = render(dream=DreamConfig(), **inputs)
+    assert plain == empty
+    assert "dream" not in plain.lower()
+
+
+def _deadline_inputs(tmp_path, deadlines):
+    """One scored row per (job_id, application_deadline); `now` is 2027-01-20 00:00 UTC."""
+    search_path = tmp_path / "search.json"
+    cands = []
+    for jid, dl in deadlines.items():
+        c = _candidate("x", jid, title=f"Role {jid}")
+        c["application_deadline"] = dl
+        cands.append(c)
+    search_path.write_text(json.dumps(_search_json(cands)))
+    assessments_path = tmp_path / "assessments.json"
+    assessments_path.write_text(json.dumps([_assessment("x", j, 80, title=f"Role {j}") for j in deadlines]))
+    return dict(
+        search_path=search_path, assessments_path=assessments_path, title="t", keyword_label=None,
+        new_days=10, now=datetime(2027, 1, 20, tzinfo=UTC),
+    )
+
+
+def test_deadline_tag_shows_date_closing_soon_and_filter_chips(tmp_path):
+    html, _ = render(**_deadline_inputs(tmp_path, {
+        "1": "2027-01-31T00:00:00+00:00",   # 11 days out -> closing soon (default 14)
+        "2": "2027-03-15T00:00:00+00:00",   # far out
+        "3": "2027-01-10T00:00:00+00:00",   # already passed
+        "4": None,                          # no deadline
+    }))
+    assert "Apply by Jan 31" in html and "11d left" in html and "tag-deadline-soon" in html
+    assert "Apply by Mar 15" in html and "Apply before 03/15/2027 12:00 AM" in html
+    assert "tag-deadline-passed" in html and "Deadline Jan 10" in html
+    assert html.count('data-deadline="1"') == 2          # future deadlines only
+    assert html.count('data-closing-soon="1"') == 1
+    assert 'data-filter-value="deadline"' in html and 'data-filter-value="closing-soon"' in html
+    assert "row.dataset.closingSoon" in html
+    assert html.count("Role 4") >= 1  # a job with no deadline is still listed, untagged
+
+
+def test_deadline_uses_the_viewers_timezone_and_the_soon_window_is_configurable(tmp_path):
+    inputs = _deadline_inputs(tmp_path, {"1": "2027-01-31T00:00:00+00:00"})
+    inputs["now"] = datetime(2027, 1, 20, tzinfo=timezone(timedelta(hours=-5)))  # Eastern
+    html, _ = render(**inputs)
+    assert "Apply by Jan 30" in html and "Apply before 01/30/2027 07:00 PM" in html  # Ford's own display
+    narrow, _ = render(deadline_soon_days=3, **inputs)
+    assert 'class="tag tag-deadline tag-deadline-soon"' in html
+    assert 'class="tag tag-deadline tag-deadline-soon"' not in narrow  # 11 days out > 3-day window
+
+
+def test_no_deadlines_means_no_deadline_assets(tmp_path):
+    html, _ = render(**_deadline_inputs(tmp_path, {"1": None}))
+    assert "deadline" not in html.lower()

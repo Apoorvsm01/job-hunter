@@ -55,4 +55,23 @@ pipeline:
 # `scripts/render_radar.py --theme ...` overrides this for a single run.
 radar:
   theme: auto
+  # Display-only "Dream" tag + filter chip on the radar (src/job_hunter/dream.py). A job is dream
+  # if ANY rule matches; never a filter on collection or scoring. Leave all three empty to turn
+  # the feature off (the radar then renders exactly as before).
+  dream:
+    companies: []          # employer name or source key, e.g. [Waymo, Google DeepMind]; a sub-brand like DeepMind works for Google postings
+    title_terms: [lead, supervisor, principal, staff]   # whole words in the job title -> Dream
+    weak_title_terms: [senior]   # too common to be "dream" alone -> lighter Dream-ish tier
+    # Phrases that cancel the title rules for a job (company/salary rules still apply). Lets a broad
+    # term such as "manager" in without tagging every Project/Product Manager:
+    title_exclusions: []   # e.g. [project manager, product manager, program manager]
+    # Per-source job level, for sources whose postings state one. pattern has ONE capture group (the
+    # level number); the highest level found must be >= min. Example (Ford: /LL6 in a salary link):
+    levels: {}
+    #   ford: {pattern: 'fordcareers\.co/LL(\d+)', min: 6, label: LL}
+    # The whole published range counts: a job qualifies when the TOP of its USD range is >= this
+    # (e.g. $128K-$209K qualifies at 160000). Jobs with no published salary just skip this rule.
+    min_salary_usd: 160000
+  # Flag a posting's "apply before" date as "closing soon" when it is within this many days.
+  deadline_soon_days: 14
 

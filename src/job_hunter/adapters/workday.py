@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 
+from ..extras import compact_extras
 from ..location import detect_arrangement
 from ..models import JobDetail, JobSummary
 from ..normalizer import fallback_job_id, parse_flexible_date, parse_relative_posted, stringify
@@ -134,4 +135,5 @@ class WorkdayAdapter(ConfigurableJsonAdapter):
             # startDate is an absolute date, more precise than the summary's relative postedOn text.
             posted_at=parse_flexible_date(info.get("startDate")) or parse_relative_posted(stringify(info.get("postedOn"))),
             work_arrangement=detect_arrangement(remote_type) if remote_type else None,
+            extras=compact_extras(info, skip_keys=("jobDescription",)) or None,
         )

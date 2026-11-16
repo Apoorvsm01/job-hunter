@@ -790,6 +790,41 @@ async def test_oracle_hcm_concatenates_multiple_description_fields():
     assert "Visa sponsorship is not available" in detail.description
 
 
+@pytest.mark.asyncio
+@respx.mock
+async def test_oracle_hcm_detail_reads_application_deadline_when_configured():
+    """Ford's "Apply Before" lives only in the per-job detail call (ExternalPostedEndDate); a null
+    value means no deadline, and a source that doesn't configure the path never reports one."""
+    base = "https://jobs.example/reqs?onlyData=true&finder=findReqs;offset=0"
+    respx.get(base).mock(return_value=httpx.Response(200, json=_oracle_page(["1", "2"], total=2)))
+    respx.get("https://jobs.example/details/1").mock(return_value=httpx.Response(
+        200, json={"ExternalDescriptionStr": "A", "Category": "Manufacturing", "ExternalPostedEndDate": "2027-01-31T00:00:00+00:00"}))
+    respx.get("https://jobs.example/details/2").mock(return_value=httpx.Response(
+        200, json={"ExternalDescriptionStr": "B", "ExternalPostedEndDate": None}))
+
+    def company(**extra):
+        return CompanyConfig(key="ford", company="Ford", adapter="oracle_hcm", config={
+            "paginate": True, "list_url": base, "items_path": "items.0.requisitionList",
+            "total_path": "items.0.TotalJobsCount", "detail_base_url": "https://jobs.example/details/",
+            "detail_description_path": ["ExternalDescriptionStr"],
+            "fields": {"id": "Id", "title": "Title", "url": "Id", "location": "PrimaryLocation"}, **extra,
+        })
+
+    async with httpx.AsyncClient() as client:
+        adapter = OracleHcmAdapter(company(detail_deadline_path="ExternalPostedEndDate", detail_department_path="Category"), client, CollectionConfig(max_retries=0))
+        jobs = await adapter.fetch_summaries()
+        with_deadline = await adapter.fetch_detail(jobs[0])
+        without = await adapter.fetch_detail(jobs[1])
+        unconfigured = await OracleHcmAdapter(company(), client, CollectionConfig(max_retries=0)).fetch_detail(jobs[0])
+    assert with_deadline.department == "Manufacturing"  # detail_department_path: Category
+    assert without.department is None
+    # everything the typed fields don't keep rides along in extras, minus the description field
+    assert with_deadline.extras == {"Category": "Manufacturing", "ExternalPostedEndDate": "2027-01-31T00:00:00+00:00"}
+    assert with_deadline.application_deadline.isoformat() == "2027-01-31T00:00:00+00:00"
+    assert without.application_deadline is None
+    assert unconfigured.application_deadline is None
+
+
 def _smartrecruiters_page(job_ids: list[str], total: int) -> dict:
     return {
         "totalFound": total,

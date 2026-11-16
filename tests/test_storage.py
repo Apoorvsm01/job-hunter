@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from datetime import UTC, date, datetime, timedelta
 
@@ -781,3 +782,49 @@ def test_a_partial_warning_run_does_not_replace_the_baseline(tmp_path):
         assert storage.previous_job_count("apple") == 1320
         _record(storage, 1400)
         assert storage.previous_job_count("apple") == 1400
+
+
+def test_application_deadline_roundtrips_and_does_not_change_content_hash(tmp_path):
+    deadline = datetime(2027, 1, 31, tzinfo=UTC)
+    with Storage(tmp_path / "jobs.sqlite3") as storage:
+        storage.upsert_job(make_job(application_deadline=deadline))
+        assert storage.get_job("acme", "42")["application_deadline"] == deadline.isoformat()
+        again = storage.upsert_job(make_job(application_deadline=datetime(2027, 2, 1, tzinfo=UTC)))
+        assert not again.is_changed  # a moved deadline is not a changed posting (no re-review)
+
+
+def test_application_deadline_column_is_added_to_an_older_database(tmp_path):
+    path = tmp_path / "jobs.sqlite3"
+    with Storage(path) as storage:
+        storage.connection.execute("ALTER TABLE jobs DROP COLUMN application_deadline")
+        storage.connection.execute("PRAGMA user_version = 5")
+        storage.connection.commit()
+    with Storage(path) as storage:
+        columns = {row[1] for row in storage.connection.execute("PRAGMA table_info(jobs)")}
+    assert "application_deadline" in columns
+
+
+def test_extras_roundtrip_as_json_and_stay_out_of_archive_dumps(tmp_path):
+    extras = {"listing": {"JobFamily": "Engineering"}, "detail": {"Category": "PD Operations and Quality"}}
+    job = make_job(extras=extras)
+    assert "extras" not in job.model_dump(mode="json")
+    with Storage(tmp_path / "jobs.sqlite3") as storage:
+        storage.upsert_job(job)
+        assert json.loads(storage.get_job("acme", "42")["extras"]) == extras
+        storage.upsert_job(make_job(extras=None))
+        assert storage.get_job("acme", "42")["extras"] is None
+
+
+def test_readonly_active_pool_reads_a_database_that_predates_new_columns(tmp_path):
+    """Read-only diagnostics never migrate, so a database without the newest columns
+    (application_deadline, extras) must still load; those fields read as not recorded."""
+    from job_hunter.active_pool import raw_active_jobs
+
+    path = tmp_path / "jobs.sqlite3"
+    with Storage(path) as storage:
+        storage.upsert_job(make_job())
+        storage.connection.execute("ALTER TABLE jobs DROP COLUMN application_deadline")
+        storage.connection.execute("ALTER TABLE jobs DROP COLUMN extras")
+        storage.connection.commit()
+    [job] = raw_active_jobs(path, readonly=True)
+    assert job.application_deadline is None and job.job_id == "42"

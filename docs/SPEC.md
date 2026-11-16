@@ -130,7 +130,10 @@ optional `payload`/`params`; `items_path` (dot-separated path to the posting lis
 (maps normalized names — `id`, `title`, `url`, `location`, `city`, `state`, `country`,
 `department`, `employment_type`, `posted_at` — to response paths); `detail_base_url`,
 `listing_description_path`, or `detail_description_path`; Oracle HCM's `paginate: true` +
-`total_path` (§5.1); the opt-in `public_url_template` (§5.4).
+`total_path` (§5.1); the opt-in `public_url_template` (§5.4); and the detail-record mappings below
+(see §3.5 "Field mappings", the place to look when a mapped field stops arriving):
+`detail_deadline_path` (→ `application_deadline`), `detail_department_path` (→ `department`),
+`expect_detail_fields` / `expect_detail_min_sample` (coverage warning).
 
 HTML adapters accept: `list_url`, `card_selector`, `link_selector`, `title_selector`,
 `location_selector`, `id_attribute`, `next_selector`, `page_parameter`/`page_size` (row-offset
@@ -141,6 +144,37 @@ pagination) or `page_number_parameter` (1-indexed page-number pagination), `post
 
 Use `scripts/endpoint_probe.py` (or curl) during development to inspect a candidate endpoint
 before writing config for it — never hand-invent an endpoint shape (§5.23).
+
+### 3.5 Field mappings: what each source's payload feeds, and how a break shows up
+
+Each adapter maps a few fields of its source's response onto the typed `Job` fields; everything
+else is kept in `jobs.extras` (`extras.py`: `{"listing": ..., "detail": ...}`, empties and
+description text dropped, strings > 2000 chars dropped with the key named in `_omitted_long`, ~20KB
+cap) so a later mapping is a local read, not a re-fetch. Mappings that are *not* a plain listing
+field, and where the data comes from:
+
+| Source | Typed field | Source field | Where | Notes |
+|---|---|---|---|---|
+| Ford (Oracle HCM) | `department` | `Category` (a coarse function, e.g. "PD Operations and Quality", "Manufacturing", "Enterprise Technology"; ~83% filled) | **detail** call only (`detail_department_path`) | The listing's `JobFunction`/`Category`/`JobFamily`/`ManagerLevel` are null on every item. `JobFunction` (finer, e.g. "Industrial and Occupational Ergonomics") is in `extras`. Feeds `prefilter` (positive gate and `soft_exclude_terms` read title + department), so it can change which jobs pass. |
+| Ford (Oracle HCM) | `application_deadline` | `ExternalPostedEndDate` | **detail** call only (`detail_deadline_path`) | Midnight UTC, displayed in the viewer's timezone ("01/30/2027 7:00 PM" Eastern is 01/31 00:00Z). Display-only. |
+
+How the collector handles detail-only fields: a field set by a fresh detail fetch is **kept from the
+stored row** when a run skips the detail fetch (`collector.py`: department falls back to
+`prior["department"]`, the deadline to `prior["application_deadline"]`), so only a *new or
+refreshed* job ever changes it. Existing jobs get a value the first time their detail is refetched:
+`job-hunter search --companies ford --refresh-details`.
+
+**Knowing when a mapping breaks.** A company can declare `expect_detail_fields: {department: 0.5}`
+(minimum filled fraction, per `JobDetail` field). After each run's detail fetches,
+`health.detect_field_coverage` compares the fields' fill rate over the details fetched *this run*
+(skipped when fewer than `expect_detail_min_sample`, default 10, were fetched, so a quiet day proves
+nothing) and, on an otherwise clean run, downgrades the source to a **`warning`** with a message like
+`Detail field coverage dropped: department filled for 3/120 fetched details (expected >= 50%)`.
+Jobs are kept; as with a count-drop warning, `mark_missing` and the count baseline are skipped for
+that run. It shows in `job-hunter source-status`, `source-test`, and the radar's Collection Issues.
+To adjust: re-inspect the live payload (`scripts/endpoint_probe.py` / curl the detail URL), fix
+`detail_department_path`, then refetch. If the field is legitimately sparse, lower the threshold
+rather than removing the check. Ford's threshold is 0.5 against ~83% observed.
 
 ---
 
@@ -1147,7 +1181,8 @@ rows forever. `--output-dir` and `--no-state` make a run side-effect free.
 ### 8.1 `jobs` — one row per `(source_key, job_id)`
 
 Full normalized record (title, location fields, `us_eligible`, `location_confidence/evidence`,
-`visa_sponsorship`/`sponsorship_evidence`, department, description, salary fields, `content_hash`,
+`visa_sponsorship`/`sponsorship_evidence`, department, description, salary fields,
+`application_deadline` (migration v6), `extras` (migration v7, JSON), `content_hash`,
 `first_seen_at`, `last_seen_at`, `status` [`active`/`closed`], `missing_count`). Upserted with
 `is_new`/`is_changed` computed from the prior row's `content_hash`. A job is marked `closed` after
 3 consecutive runs missing from a healthy source's listing (`mark_missing`); it stays `active`

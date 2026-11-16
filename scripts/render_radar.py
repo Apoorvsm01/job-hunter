@@ -56,7 +56,7 @@ import html
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -64,7 +64,8 @@ from job_hunter.active_pool import source_jobs as _pool_source_jobs
 from job_hunter.active_pool import stopped_early as _stopped_early
 from job_hunter.active_pool import wants_fallback as _wants_fallback
 from job_hunter.atomic import atomic_write_text
-from job_hunter.config import CandidateProfile, load_profile, load_settings
+from job_hunter.config import CandidateProfile, DreamConfig, load_profile, load_settings
+from job_hunter.dream import DreamDecision, evaluate_dream
 from job_hunter.rootutil import add_project_argument, chdir_to_project_root, nonneg_int
 from job_hunter.search_archive import resolve_search_path
 from job_hunter.storage import Storage
@@ -188,7 +189,116 @@ def _arrangement_tag(arrangement: str | None) -> str:
     # "unmentioned" — onsite is the unremarkable default and unknown says nothing.
 
 
-def _filter_data_attrs(*, sponsorship: str | None, arrangement: str | None, is_new: bool, is_long_standing: bool) -> str:
+def _dream_tag(decision: DreamDecision | None) -> str:
+    """Display-only "Dream" badge (see `dream.py`); the title attribute carries *why* it matched.
+    Empty when the feature is off (decision is None) or the job doesn't qualify."""
+    if decision is None or decision.tier is None:
+        return ""
+    cls, label = ("tag-dream", "&#9733; Dream") if decision.is_dream else ("tag-dream-ish", "&#9734; Dream-ish")
+    return f'<span class="tag {cls}" title="{_attr("; ".join(decision.reasons))}">{label}</span>'
+
+
+# Dream-only template additions, applied by `_apply_dream_assets` only when settings.radar.dream is
+# configured, so a default page stays byte-identical to the pre-dream golden.
+_DREAM_ANCHORS = {
+    "css": '  .tag-long-standing { background: var(--line); color: var(--muted); }\n',
+    "chip": '      <button type="button" class="filter-chip" data-filter-group="tag" data-filter-value="long-standing">Long-standing</button>\n',
+    "js": "        if (v === 'long-standing') return row.dataset.longStanding === '1';\n",
+}
+_DREAM_ADDITIONS = {
+    "css": (
+        "  .tag-dream { background: var(--status-warning-soft); color: var(--status-warning);"
+        " border: 1px solid currentColor; cursor: help; }\n"
+        "  .tag-dream-ish { background: transparent; color: var(--muted);"
+        " border: 1px dashed currentColor; cursor: help; }\n"
+    ),
+    "chip": (
+        '      <button type="button" class="filter-chip" data-filter-group="tag" data-filter-value="dream"'
+        ' title="Titles, companies or pay you marked as dream in settings.yaml">&#9733; Dream</button>\n'
+        '      <button type="button" class="filter-chip" data-filter-group="tag" data-filter-value="dream-ish"'
+        ' title="Only a weaker title term matched (e.g. senior)">&#9734; Dream-ish</button>\n'
+    ),
+    "js": (
+        "        if (v === 'dream') return row.dataset.dream === '1';\n"
+        "        if (v === 'dream-ish') return row.dataset.dreamIsh === '1';\n"
+    ),
+}
+
+
+def _inject_assets(html: str, feature: str, additions: dict[str, str]) -> str:
+    for name, addition in additions.items():
+        anchor = _DREAM_ANCHORS[name]
+        if html.count(anchor) != 1:  # fail loudly if a template edit breaks a conditional filter
+            raise ValueError(f"radar template no longer contains the {feature} {name} anchor")
+        html = html.replace(anchor, anchor + addition)
+    return html
+
+
+def _apply_dream_assets(html: str) -> str:
+    return _inject_assets(html, "dream", _DREAM_ADDITIONS)
+
+
+# "Apply by" deadline tag + chips, injected only when at least one job states a deadline.
+_DEADLINE_ADDITIONS = {
+    "css": (
+        "  .tag-deadline { background: var(--line); color: var(--ink); border: 1px solid var(--muted); cursor: help; }\n"
+        "  .tag-deadline-soon { background: var(--danger-soft); color: var(--danger); border-color: currentColor; }\n"
+        "  .tag-deadline-passed { color: var(--muted); border-style: dashed; text-decoration: line-through; }\n"
+    ),
+    "chip": (
+        '      <button type="button" class="filter-chip" data-filter-group="tag" data-filter-value="deadline"'
+        ' title="Postings that state an apply-before date">&#9200; Has deadline</button>\n'
+        '      <button type="button" class="filter-chip" data-filter-group="tag" data-filter-value="closing-soon"'
+        ' title="Apply-before date is coming up soon">&#9200; Closing soon</button>\n'
+    ),
+    "js": (
+        "        if (v === 'deadline') return row.dataset.deadline === '1';\n"
+        "        if (v === 'closing-soon') return row.dataset.closingSoon === '1';\n"
+    ),
+}
+
+
+def _deadline_info(value: Any, *, now: datetime, soon_days: int) -> dict[str, Any] | None:
+    """Display facts for a posting's apply-before instant (ISO string or datetime), in the zone
+    `now` carries. None when the job states no (parseable) deadline."""
+    if not value:
+        return None
+    try:
+        deadline = value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    if deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=UTC)
+    local = deadline.astimezone(now.tzinfo)
+    days_left = (local.date() - now.date()).days
+    return {
+        "label": f"{local:%b} {local.day}",
+        "title": f"Apply before {local:%m/%d/%Y %I:%M %p}",
+        "days_left": days_left,
+        "passed": local <= now,
+        "soon": local > now and days_left <= soon_days,
+    }
+
+
+def _deadline_tag(info: dict[str, Any] | None) -> str:
+    if info is None:
+        return ""
+    if info["passed"]:
+        return f'<span class="tag tag-deadline tag-deadline-passed" title="{_attr(info["title"])}">Deadline {_e(info["label"])}</span>'
+    left = f" &middot; {info['days_left']}d left" if info["soon"] else ""
+    cls = "tag-deadline tag-deadline-soon" if info["soon"] else "tag-deadline"
+    return f'<span class="tag {cls}" title="{_attr(info["title"])}">&#9200; Apply by {_e(info["label"])}{left}</span>'
+
+
+def _dream_decision(job: dict[str, Any], dream: DreamConfig | None) -> DreamDecision | None:
+    """None (not "not dream") when the feature is off, so no dream attribute/tag is emitted."""
+    return evaluate_dream(job, dream) if dream is not None and dream.enabled else None
+
+
+def _filter_data_attrs(
+    *, sponsorship: str | None, arrangement: str | None, is_new: bool, is_long_standing: bool,
+    dream: DreamDecision | None = None, deadline: dict[str, Any] | None = None,
+) -> str:
     """data-* attributes the client-side filter toolbar reads directly off each row — kept as
     their own explicit attributes rather than having the toolbar's JS re-derive them from
     which `.tag-*` spans happen to be present, so a future tag-rendering change can't
@@ -197,9 +307,15 @@ def _filter_data_attrs(*, sponsorship: str | None, arrangement: str | None, is_n
     duplicating them into attributes, which would otherwise sit earlier in the markup than the
     visible text and confuse any lookup-by-title-text (a real bug caught by this project's own
     tests, which locate a row by searching for its title)."""
+    dream_attr = (
+        f' data-dream="{1 if dream.is_dream else 0}" data-dream-ish="{1 if dream.is_weak else 0}"'
+        if dream is not None else ""
+    )
     return (
         f'data-sponsorship="{_attr(sponsorship or "")}" data-arrangement="{_attr(arrangement or "")}" '
-        f'data-new="{1 if is_new else 0}" data-long-standing="{1 if is_long_standing else 0}"'
+        f'data-new="{1 if is_new else 0}" data-long-standing="{1 if is_long_standing else 0}"' + dream_attr
+        + (' data-deadline="1"' if deadline and not deadline["passed"] else "")
+        + (' data-closing-soon="1"' if deadline and deadline["soon"] else "")
     )
 
 
@@ -325,7 +441,7 @@ def _row_html(
     # placement reintroduces the original bug: a variable-width column only misaligns
     # whatever comes *after* it, and nothing variable-width sits before .job any more.
     new_badge = '<span class="tag tag-new">New</span>' if row["new"] else ""
-    other_tags = ""
+    other_tags = _dream_tag(row.get("dream")) + _deadline_tag(row.get("deadline"))
     if row.get("long_standing"):
         other_tags += '<span class="tag tag-long-standing">Long-standing</span>'
     other_tags += _stale_source_tag(row.get("stale_source_note"))
@@ -333,7 +449,8 @@ def _row_html(
     other_tags += _arrangement_tag(row.get("work_arrangement"))
     filter_attrs = _filter_data_attrs(
         sponsorship=row.get("visa_sponsorship"), arrangement=row.get("work_arrangement"),
-        is_new=row["new"], is_long_standing=row.get("long_standing", False),
+        is_new=row["new"], is_long_standing=row.get("long_standing", False), dream=row.get("dream"),
+        deadline=row.get("deadline"),
     )
     date_display = _fmt_date(row["posted_at"]) or _fmt_first_seen(row.get("first_seen_at")) or "Date unknown"
     matches_html = "".join(f"<li>{_e(m)}</li>" for m in row["matches"])
@@ -434,7 +551,7 @@ def _never_reviewed_row_html(
         undated_new_days=undated_new_days, undated_stale_days=undated_stale_days,
     )
     new_badge = '<span class="tag tag-new">New</span>' if is_new else ""
-    other_tags = ""
+    other_tags = _dream_tag(candidate.get("dream")) + _deadline_tag(candidate.get("deadline"))
     if is_long_standing:
         other_tags += '<span class="tag tag-long-standing">Long-standing</span>'
     other_tags += _stale_source_tag(candidate.get("stale_source_note"))
@@ -442,7 +559,8 @@ def _never_reviewed_row_html(
     other_tags += _arrangement_tag(candidate.get("work_arrangement"))
     filter_attrs = _filter_data_attrs(
         sponsorship=candidate.get("visa_sponsorship"), arrangement=candidate.get("work_arrangement"),
-        is_new=is_new, is_long_standing=is_long_standing,
+        is_new=is_new, is_long_standing=is_long_standing, dream=candidate.get("dream"),
+        deadline=candidate.get("deadline"),
     )
     date_display = _fmt_date(posted_at) or _fmt_first_seen(first_seen_at) or "Date unknown"
     meta_html = _job_meta_html(candidate.get("location_raw"), candidate.get("salary_evidence"))
@@ -826,6 +944,8 @@ def render(
     live: bool = False,
     live_state: LiveState | None = None,
     theme: ResolvedTheme | None = None,
+    dream: DreamConfig | None = None,
+    deadline_soon_days: int = 14,
 ) -> tuple[str, dict[str, Any]]:
     if live and live_state is None:
         raise ValueError("live=True requires a LiveState")
@@ -860,7 +980,14 @@ def render(
     for key, candidate in candidates.items():
         assessment = assess_map.get(key)
         if not assessment:
-            never_reviewed_candidates.append(candidate)  # already has source_key/job_id
+            never_reviewed_candidates.append(
+                {  # already has source_key/job_id
+                    **candidate, "dream": _dream_decision(candidate, dream),
+                    "deadline": _deadline_info(
+                        candidate.get("application_deadline"), now=now, soon_days=deadline_soon_days
+                    ),
+                }
+            )
             continue
         posted_at = candidate.get("posted_at")
         first_seen_at = candidate.get("first_seen_at")
@@ -901,6 +1028,10 @@ def render(
                 "state": candidate.get("state"),
                 "country": candidate.get("country"),
                 "stale_source_note": candidate.get("stale_source_note"),
+                "dream": _dream_decision(candidate, dream),
+                "deadline": _deadline_info(
+                    candidate.get("application_deadline"), now=now, soon_days=deadline_soon_days
+                ),
             }
         )
 
@@ -1024,6 +1155,10 @@ def render(
     tokens["__LIVE_SCRIPT__"] += active_theme.script_html
     # Single pass: substituted text is never rescanned, so data containing a token is inert.
     out = re.sub(r"__[A-Z][A-Z0-9_]*__", lambda m: tokens.get(m.group(0), m.group(0)), template)
+    if dream is not None and dream.enabled:
+        out = _apply_dream_assets(out)
+    if any(r.get("deadline") for r in rows) or any(c.get("deadline") for c in never_reviewed_candidates):
+        out = _inject_assets(out, "deadline", _DEADLINE_ADDITIONS)
     return out, {
         "strong": len(strong),
         "review": len(review),
@@ -1148,6 +1283,8 @@ def selection_render_kwargs(
         keywords=keywords,
         collection_fallback=not args.no_collection_fallback,
         theme=resolve_page_theme(args, settings, profile),
+        dream=settings.radar.dream,
+        deadline_soon_days=settings.radar.deadline_soon_days,
     )
 
 

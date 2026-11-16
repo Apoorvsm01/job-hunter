@@ -282,6 +282,43 @@ ranked `SearchResult` JSON.
   button, themed heading/chips); it listens for `jobhunter:offer-mode` and the goldens are unaffected.
   Under `forest-dawn` the sky follows progress: `applications.js` sets `--mf-rise` (0.1 with no stage row, else furthest of saved/applied/interviewing/offer / 4) and the CSS lifts the sun and fades a `.mf-dusk` overlay.
 
+- **`src/job_hunter/dream.py`** — display-only "Dream" tag + filter chip on the radar, configured by `settings.radar.dream`
+  (`DreamConfig`: `companies`, `title_terms`, `min_salary_usd`; any one rule matching tags the job, all empty = feature off).
+  `evaluate_dream` returns a `DreamDecision` with the reasons (shown as the badge's tooltip). Title terms match whole words
+  only; salary uses the top of a USD range, and a missing salary never disqualifies. Never a filter or score input. The CSS,
+  chip and filter JS are injected by `render_radar._apply_dream_assets` only when configured, so the default page stays
+  byte-identical (golden). Companies match the employer name/source key exactly, plus the
+  `corporate_fare<Employer>place` label Google's pages carry in the scraped description (Google/YouTube/DeepMind),
+  so `Google DeepMind` matches only DeepMind postings under the `google` source.
+
+- **Application deadline** (`Job.application_deadline`, `jobs.application_deadline`, migration v6) — the posting's
+  "apply before" instant, display-only (never a filter, never in `content_hash`, so a moved deadline forces no
+  re-review). Opt-in per source via `detail_deadline_path` on `ConfigurableJsonAdapter`/`oracle_hcm` (Ford:
+  `ExternalPostedEndDate`; the listing's `PostingEndDate` is always null — only the per-job detail call has it, midnight
+  UTC, so Ford's "01/30/2027 7:00 PM" is 01/31 00:00Z). Only a fresh detail fetch sets it: the collector keeps the stored
+  value when no detail is refetched, so existing jobs need `search --companies <key> --refresh-details` to gain one. The
+  radar shows an "Apply by <date>" tag (viewer's timezone; "closing soon" within `radar.deadline_soon_days`, struck
+  through once passed) plus "Has deadline"/"Closing soon" chips, injected by `render_radar._inject_assets` only when some
+  job has a deadline so deadline-free pages stay byte-identical.
+
+- **`src/job_hunter/extras.py`** (`jobs.extras`, migration v7) — everything an adapter's typed fields don't keep, so a
+  later "we should have stored X" is a local read, not a re-fetch of every detail. `{"listing": ..., "detail": ...}` JSON,
+  empties and the description fields dropped, strings over 2000 chars dropped (key listed in `_omitted_long`), total capped
+  ~20KB. The listing item is recaptured every run (`collector._job_extras`); the detail part only when a detail is fetched
+  (the stored one is kept otherwise). Detail capture is in `ConfigurableJsonAdapter.fetch_detail` (Oracle/Ford, Greenhouse,
+  Lever, Ashby, ... inherit it) and Workday native; **adapters that build their own `JobDetail` (eightfold, bosch, apple,
+  csod, adp, ... and every HTML adapter) don't capture detail extras yet** — add `extras=compact_extras(...)`. Never in
+  archives (`Job.extras` is `exclude=True`), never a filter, never in `content_hash`. Existing jobs have none until their
+  detail is refetched once (`search --companies X --refresh-details`).
+- **Field mappings and their health check** (`docs/SPEC.md` §3.5) — Ford's `department` is the detail call's `Category`
+  (`detail_department_path`; the listing has none), and its deadline is `ExternalPostedEndDate`. A company's
+  `expect_detail_fields: {department: 0.5}` makes `health.detect_field_coverage` raise a `warning` when freshly fetched
+  details stop carrying a field (min sample 10), so an upstream rename can't silently blank a mapped field. A detail-only
+  field is kept from the stored row on runs that skip the detail fetch (`collector.py` falls back to `prior[...]`).
+- **Dream levels** (`radar.dream.levels`, `LevelRule`) — per-source minimum job level for the Dream tag, read from the
+  posting text by a one-capture-group regex (Ford: `fordcareers\.co/LL(\d+)`, min 6; only ~20% of Ford postings state a
+  level, and Woven's states none, so it has no rule). Ford's listing `ManagerLevel`/`JobFamily` are null for every job.
+
 - **`scripts/refilter_archive.py`** — answers "what would this already-collected archive's
   candidates look like under the *current* profile," no network. Rebuilds `candidates` from
   SQLite's current `status='active' AND us_eligible=1` pool, scoped to the archive's own
