@@ -16,7 +16,7 @@ from pathlib import Path
 from .active_pool import raw_active_jobs
 from .config import CandidateProfile
 from .models import Job, PrefilterRule
-from .prefilter import evaluate_prefilter, passes_recency
+from .prefilter import evaluate_prefilter, gate_text_for, passes_recency
 
 #: Tokens too common to justify a profile term on their own (a candidate phrase must contain at
 #: least one token that is not in this set and has >= 3 characters).
@@ -79,7 +79,7 @@ class PhraseGain:
 
 
 def _gate_text(job: Job) -> str:
-    return f"{job.title} {job.department or ''}".lower()
+    return gate_text_for(job)
 
 
 def phrase_gain(
