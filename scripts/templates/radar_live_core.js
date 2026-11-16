@@ -33,7 +33,9 @@
     var q = f.query.trim().toLowerCase();
     if (q && (facts.company + ' ' + facts.title).toLowerCase().indexOf(q) === -1) return false;
     if (f.tags.length && !f.tags.some(function (t) {
-      return (t === 'new' && facts.isNew) || (t === 'long-standing' && facts.longStanding);
+      return (t === 'new' && facts.isNew) || (t === 'long-standing' && facts.longStanding) ||
+        (t === 'dream' && facts.dream) || (t === 'dream-ish' && facts.dreamIsh) ||
+        (t === 'deadline' && facts.deadline) || (t === 'closing-soon' && facts.closingSoon);
     })) return false;
     if (f.arrangement.length && f.arrangement.indexOf(facts.arrangement) === -1) return false;
     if (f.sponsorship.length && f.sponsorship.indexOf(facts.sponsorship) === -1) return false;

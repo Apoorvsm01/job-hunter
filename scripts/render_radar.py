@@ -234,8 +234,10 @@ def _inject_assets(html: str, feature: str, additions: dict[str, str]) -> str:
     return html
 
 
-def _apply_dream_assets(html: str) -> str:
-    return _inject_assets(html, "dream", _DREAM_ADDITIONS)
+def _apply_dream_assets(html: str, *, live: bool = False) -> str:
+    # Live pages filter through radar_live_core.js (row facts), not the static template's JS.
+    additions = {k: v for k, v in _DREAM_ADDITIONS.items() if not (live and k == "js")}
+    return _inject_assets(html, "dream", additions)
 
 
 # "Apply by" deadline tag + chips, injected only when at least one job states a deadline.
@@ -1176,9 +1178,12 @@ def render(
     # Single pass: substituted text is never rescanned, so data containing a token is inert.
     out = re.sub(r"__[A-Z][A-Z0-9_]*__", lambda m: tokens.get(m.group(0), m.group(0)), template)
     if dream is not None and dream.enabled:
-        out = _apply_dream_assets(out)
+        out = _apply_dream_assets(out, live=live)
     if any(r.get("deadline") for r in rows) or any(c.get("deadline") for c in never_reviewed_candidates):
-        out = _inject_assets(out, "deadline", _DEADLINE_ADDITIONS)
+        out = _inject_assets(
+            out, "deadline",
+            {k: v for k, v in _DEADLINE_ADDITIONS.items() if not (live and k == "js")},
+        )
     return out, {
         "strong": len(strong),
         "review": len(review),

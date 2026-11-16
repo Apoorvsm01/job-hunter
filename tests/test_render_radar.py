@@ -1681,6 +1681,19 @@ def test_dream_tag_and_filter_only_when_configured(tmp_path):
     assert "Controls Engineer" in html  # tag only, never a filter on what is listed
 
 
+def test_dream_chips_render_in_live_mode(tmp_path):
+    """The live page filters through radar_live_core.js, so the static-JS injection is skipped
+    there (it used to raise) while the chips and row flags still render."""
+    from job_hunter.config import DreamConfig
+
+    cfg = DreamConfig(title_terms=["supervisor"])
+    html, _ = render(dream=cfg, live=True, live_state=_live_state(), **_dream_inputs(tmp_path))
+    assert 'data-filter-value="dream"' in html and 'data-dream="1"' in html
+    assert "row.dataset.dream" not in html  # static-only snippet
+    core = (Path(__file__).parent.parent / "scripts/templates/radar_live_core.js").read_text()
+    assert "t === 'dream' && facts.dream" in core and "t === 'closing-soon' && facts.closingSoon" in core
+
+
 def test_dream_off_leaves_no_trace(tmp_path):
     from job_hunter.config import DreamConfig
 
