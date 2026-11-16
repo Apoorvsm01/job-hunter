@@ -228,3 +228,13 @@ def test_review_gives_up_after_the_second_malformed_answer():
     with pytest.raises(ValueError):
         _review(client)
     assert len(client.bodies) == 2
+
+
+def test_resume_for_review_is_the_master_text_unless_the_view_is_enabled():
+    import review_with_lm_studio as r
+
+    text = "# **JANE DOE**\n\njane@example.com | https://example.com\n\n# **SUMMARY**\n\nHello.\n"
+    assert r.resume_for_review(text, {}) == text
+    assert r.resume_for_review(text, {"resume_view": {"enabled": False}}) == text
+    view = r.resume_for_review(text, {"resume_view": {"enabled": True}})
+    assert "jane@example.com" not in view and "JANE" not in view and "Hello." in view

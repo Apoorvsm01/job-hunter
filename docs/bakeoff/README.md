@@ -33,6 +33,11 @@ Read the tables in `RESULTS.md`, then these limits:
 - **Small and MoE models separate the domains poorly:** `qwen3-4b` lets 31-41 of 60 irrelevant jobs reach 70 or more;
   `nemotron-3-nano-omni` (off) never scored above 79, passed 22 of 55 irrelevant jobs at 70 or more and failed the JSON schema
   on 8 of 97 jobs. `qwen3-4b-2507` is clean on noise (0 of 55) but its AUC is 0.91.
+- **Resume view** (`resume_view` in `config/lm_studio.yaml`): the condensed, contact-free resume (internships, student-team and
+  invited-talks sections cut to one line) was neutral on speed (10.5 vs about 11 s/job, the prompt prefix is cached) and slightly worse
+  on recall: 22 of 33 wanted jobs at 70 or more against 25-26 of 34, AUC 0.987 against 0.991-0.992. Stripping only the contact block
+  and URLs cannot change a verdict and saves tokens and privacy, so that is what to enable; leave `compact_sections` empty unless your
+  own bake-off says otherwise. The published row marked `resume view: on` is the condensed variant.
 - Thinking-on runs that did not finish are listed in `RESULTS.md` without quality numbers.
 
 ## Run it on your machine

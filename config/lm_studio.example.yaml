@@ -19,3 +19,12 @@ temperature: 0.2
 #   default = send nothing; the model keeps its own setting (usually full thinking).
 # Pick the model and mode with `scripts/bakeoff_models.py` on your own hardware. A malformed answer is retried once.
 reasoning: default
+
+# Resume view: send the model a smaller, contact-free copy of the master resume (the file is never edited and the
+# resume generator keeps the original). Drops the name/contact block and scrubs emails, phones and URLs; sections
+# listed in compact_sections and entries whose title contains a compact_entry_terms word shrink to one line
+# (title | employer | dates). Check it with `scripts/bakeoff_models.py --resume-view` vs `--no-resume-view`.
+resume_view:
+  enabled: false
+  compact_sections: []        # e.g. ["student team", "invited talks"] (top-level headings, case-insensitive)
+  compact_entry_terms: []     # e.g. ["intern"]

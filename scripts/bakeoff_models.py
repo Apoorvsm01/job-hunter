@@ -79,7 +79,7 @@ GOLDEN = Path("data/golden/golden_jobs.json")
 RESULTS_CSV = Path("docs/bakeoff/results.csv")
 RESULTS_MD = Path("docs/bakeoff/RESULTS.md")
 RESULT_COLUMNS = [
-    "run_id", "run_date", "chip", "ram_gb", "hardware_note", "model", "model_gb", "mode", "context", "prompt_commit", "skill_version",
+    "run_id", "run_date", "chip", "ram_gb", "hardware_note", "model", "model_gb", "mode", "context", "prompt_commit", "skill_version", "resume_view",
     "golden_id", "golden_jobs", "golden_positive", "golden_negative", "status", "jobs_done", "jobs_target",
     "auc", "neg_ge70", "pos_ge70", "pos_ge75", "pos_ge80", "neg_off", "pos_off",
     "valid_first_try", "valid_final", "median_secs", "total_min", "median_out_tokens",
@@ -386,7 +386,7 @@ def result_rows(out_dir: Path, golden: list[dict[str, Any]]) -> list[dict[str, A
             "run_id": out_dir.name, "run_date": meta["created_at"][:10], "chip": hw["chip"], "ram_gb": hw["ram_gb"], "hardware_note": hw.get("note", ""),
             "model": run["model"], "model_gb": (meta.get("model_gb") or {}).get(run["model"], ""), "mode": run["mode"],
             "context": meta["context_length"], "prompt_commit": meta["prompt"]["commit"],
-            "skill_version": meta["prompt"]["skill_version"], "golden_id": meta["golden_id"], "golden_jobs": meta["golden_jobs"],
+            "skill_version": meta["prompt"]["skill_version"], "resume_view": "on" if meta.get("resume_view") else "off", "golden_id": meta["golden_id"], "golden_jobs": meta["golden_jobs"],
             "golden_positive": meta["golden_positive"], "golden_negative": meta["golden_negative"],
             "status": "complete" if finished else "did-not-finish", "jobs_done": u["done"], "jobs_target": u["target"],
             # quality numbers only for a complete run: a partial sample is not comparable
@@ -433,11 +433,11 @@ def render_results_md(rows: list[dict[str, str]]) -> str:
         lines += [f"## {chip}, {ram} GB{(' (' + note + ')') if note else ''}", "",
                   f"Run {first['run_date']}, review prompt `{commit}` (job-reviewer {first['skill_version']}), context {first['context']}, golden set `{gid}` "
                   f"({first['golden_jobs']} jobs: {first['golden_positive']} wanted, {first['golden_negative']} tagged irrelevant).", "",
-                  "| run | model | size GB | thinking | AUC | irrelevant ≥70 | wanted ≥70 | wanted ≥75 | wanted ≥80 | wanted called off-domain | secs/job (median) | total min |",
-                  "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+                  "| run | model | size GB | thinking | resume view | AUC | irrelevant ≥70 | wanted ≥70 | wanted ≥75 | wanted ≥80 | wanted called off-domain | secs/job (median) | total min |",
+                  "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
         done = sorted([r for r in grp if r["status"] == "complete"], key=lambda r: (-float(r["auc"] or 0), float(r["median_secs"] or 1e9)))
         for r in done:
-            lines.append(f"| {r['run_id']} | {r['model']} | {r['model_gb']} | {r['mode']} | {r['auc']} | {r['neg_ge70']} | {r['pos_ge70']} | {r['pos_ge75']} | {r['pos_ge80']} | {r['pos_off']} | {r['median_secs']} | {r['total_min']} |")
+            lines.append(f"| {r['run_id']} | {r['model']} | {r['model_gb']} | {r['mode']} | {r.get('resume_view') or 'off'} | {r['auc']} | {r['neg_ge70']} | {r['pos_ge70']} | {r['pos_ge75']} | {r['pos_ge80']} | {r['pos_off']} | {r['median_secs']} | {r['total_min']} |")
         dnf = [r for r in grp if r["status"] != "complete"]
         if dnf:
             lines += ["", "**Did not finish inside the time budget: excluded, no quality numbers (a partial sample is not comparable).**", "",
@@ -465,6 +465,8 @@ def main() -> int:
     parser.add_argument("--publish", type=Path, nargs="+", default=None, metavar="RUN_DIR",
                         help="append the aggregate results of these run directories to docs/bakeoff/ and exit (no per-job data)")
     parser.add_argument("--hardware-note", default="", help="free text stored with the run, e.g. 'RTX 4090 24GB' (GPU is not auto-detected off macOS)")
+    parser.add_argument("--resume-view", action=argparse.BooleanOptionalAction, default=None,
+                        help="force the condensed, contact-free resume on/off (default: config/lm_studio.yaml `resume_view`)")
     parser.add_argument("--plan", action="store_true", help="print the plan and exit")
     parser.add_argument("--keep-loaded", action="store_true", help="leave the last model loaded at the end")
     add_project_argument(parser)
@@ -501,13 +503,18 @@ def main() -> int:
         if args.plan:
             return 0
         out_dir = args.resume or args.out_dir or Path("data/golden/bakeoff") / datetime.now().strftime("%Y-%m-%d-T-%H-%M-%S")
+        profile, resume = reviewer.resolve_resume(load_profile(), Path.cwd())
+        view_cfg = dict(cfg.get("resume_view") or {})
+        if args.resume_view is not None:  # force on/off for a controlled comparison; sections still come from config
+            view_cfg["enabled"] = args.resume_view
+        resume = reviewer.resume_for_review(resume, {**cfg, "resume_view": view_cfg})
         (out_dir / "runs").mkdir(parents=True, exist_ok=True)
         if not (out_dir / "meta.json").exists():  # a resumed night keeps its original hardware/prompt record
             meta = run_meta(golden, context_length=args.context_length, note=args.hardware_note)
             sizes = installed_models(client, root)
+            meta["resume_view"] = bool(({**cfg, "resume_view": view_cfg}).get("resume_view", {}).get("enabled"))
             meta["model_gb"] = {k: round((sizes[k].get("size_bytes") or 0) / 1e9, 1) for k, _ in plan if k in sizes}
             atomic_write_text(out_dir / "meta.json", json.dumps(meta, indent=1) + "\n")
-        profile, resume = reviewer.resolve_resume(load_profile(), Path.cwd())
         rubric = reviewer._SCORING_RUBRIC_PATH.read_text(encoding="utf-8")
         context = build_context(profile, golden)
         descriptions = clean_descriptions([{**j, "source_key": j["source_key"], "job_id": j["job_id"]} for j in golden])

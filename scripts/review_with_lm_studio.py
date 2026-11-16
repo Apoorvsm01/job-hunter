@@ -40,6 +40,7 @@ from job_hunter.config import CandidateProfile, load_profile, load_settings
 from job_hunter.lm_studio_health import check_lm_studio, load_lm_studio_config, reasoning_fields
 from job_hunter.models import Assessment
 from job_hunter.resume_source import resolve_master_resume
+from job_hunter.resume_view import review_resume_view
 from job_hunter.review_prompt import (
     ModelVerdict,
     apply_caps,
@@ -215,6 +216,15 @@ def _refresh_export(storage: Storage, database_path: Path) -> None:
     atomic_write_text(path, json.dumps(rows, indent=2, default=str, ensure_ascii=False) + "\n")
 
 
+def resume_for_review(resume: str, config: dict[str, Any]) -> str:
+    """The resume text sent to the model: the master text unchanged unless `resume_view.enabled` in
+    config/lm_studio.yaml, in which case the contact-free, condensed copy (the file on disk is never edited)."""
+    view = config.get("resume_view") or {}
+    if not view.get("enabled"):
+        return resume
+    return review_resume_view(resume, compact_sections=view.get("compact_sections"), compact_entry_terms=view.get("compact_entry_terms"))
+
+
 def resolve_resume(profile: CandidateProfile, root: Path) -> tuple[CandidateProfile, str]:
     """The resume text to score against: the newest dated config/resume/main_resume_<date>.md if there
     is one, else the profile's resume_path (today's behavior). The returned profile carries the
@@ -316,6 +326,7 @@ def main() -> int:
 
     try:
         profile, resume = resolve_resume(load_profile(), Path.cwd())
+        resume = resume_for_review(resume, config)
     except FileNotFoundError:
         print(
             "job-hunter: no resume found (add config/resume/main_resume_<YYYY-MM-DD>.md or set "
