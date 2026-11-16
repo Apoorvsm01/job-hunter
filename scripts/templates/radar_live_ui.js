@@ -35,6 +35,7 @@
       hasSalary: d.hasSalary === '1', isNew: d.new === '1', longStanding: d.longStanding === '1',
       dream: d.dream === '1', dreamIsh: d.dreamIsh === '1',
       deadline: d.deadline === '1', closingSoon: d.closingSoon === '1',
+      fitTop: d.fitTop === '1', fitLikely: d.fitLikely === '1', payOk: d.pay === 'ok',
       arrangement: d.arrangement || '', sponsorship: d.sponsorship || '',
       title: text(row, '.job-title'), company: text(row, '.job-company'),
       location: text(row, '.job-location')

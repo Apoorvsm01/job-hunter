@@ -150,12 +150,29 @@ class DreamConfig(BaseModel):
         return bool(self.companies or self.title_terms or self.weak_title_terms or self.levels or self.min_salary_usd)
 
 
+class FitConfig(BaseModel):
+    """Display-only fit tiers and pay indicator on the radar (`job_hunter.fit`). Off unless
+    `enabled`, so a default page stays byte-identical. Scores are the local model's, after the
+    deterministic caps in `review_prompt.apply_caps`."""
+
+    enabled: bool = False
+    # Assessments that carry the review prompt's judgments (domain/level/blockers): the prompt scores
+    # about 4 points lower than the older one and gates domain itself, so its bars are lower.
+    top_min_score: int = Field(default=78, ge=0, le=100)  # "Top pick": core domain, level match, no blocker
+    likely_min_score: int = Field(default=70, ge=0, le=100)  # "Likely fit"; also the Dream bar for "Top pick"
+    # Assessments made before the judgments existed have only a score, and no domain gate behind it.
+    legacy_top_min_score: int = Field(default=85, ge=0, le=100)
+    legacy_likely_min_score: int = Field(default=75, ge=0, le=100)
+    pay_floor_usd: int = Field(default=160000, ge=0)  # top of the stated annual range, as for Dream
+
+
 class RadarConfig(BaseModel):
     """Look of the generated HTML pages. `auto` is the plain light/dark page; the forest themes
     are opt-in (docs/superpowers/specs/2026-10-03-forest-offer-theme-design.md)."""
 
     theme: Literal["auto", "forest", "forest-dawn"] = "auto"
     dream: DreamConfig = DreamConfig()
+    fit: FitConfig = FitConfig()
     # A posting's "apply before" date within this many days is flagged "closing soon" on the radar.
     deadline_soon_days: int = Field(default=14, ge=1)
 

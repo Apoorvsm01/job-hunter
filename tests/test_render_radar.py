@@ -1768,3 +1768,45 @@ def test_multi_range_pay_shows_lowest_to_highest_with_each_tier_in_the_dropdown(
     assert html.count("Pay ranges (summary shows lowest to highest):") == 1
     assert "&bull; 184,000 USD - 287,500 USD for Level 4" in html and "&bull; 224,000 USD - 356,500 USD for Level 5" in html
     assert html.count('<span class="job-salary">') == 1  # the single-range job stays plain
+
+
+def test_fit_and_pay_tags_only_when_enabled(tmp_path):
+    from job_hunter.config import FitConfig
+
+    inputs = _dream_inputs(tmp_path)
+    plain, _ = render(**inputs)
+    off, _ = render(fit=FitConfig(), **inputs)
+    assert plain == off and "fit-top" not in plain and "tag-pay" not in plain
+
+    search = json.loads(inputs["search_path"].read_text())
+    search["candidates"][0]["salary_max"] = 120000
+    search["candidates"][1]["salary_max"] = 200000
+    inputs["search_path"].write_text(json.dumps(search))
+    judged = json.loads(inputs["assessments_path"].read_text())
+    for a in judged:  # assessments made by the judging prompt: 80 + core + level match = Top pick
+        a.update(domain_fit="core", seniority_fit="match", blockers=[])
+    inputs["assessments_path"].write_text(json.dumps(judged))
+    html, _ = render(fit=FitConfig(enabled=True), **inputs)
+    assert html.count("tag-fit-top") >= 3  # css rule + the two score-80 rows' tags
+    assert 'data-fit-top="1"' in html and 'data-pay="low"' in html and 'data-pay="ok"' in html
+    assert 'data-filter-value="fit-top"' in html and "row.dataset.fitTop" in html
+    assert ">$120K</span>" in html and ">$200K</span>" in html
+
+    live, _ = render(fit=FitConfig(enabled=True), live=True, live_state=_live_state(), **inputs)
+    assert 'data-filter-value="pay-ok"' in live and "row.dataset.fitTop" not in live
+    core = (Path(__file__).parent.parent / "scripts/templates/radar_live_core.js").read_text()
+    assert "facts.fitTop" in core and "facts.payOk" in core
+
+
+def test_dream_by_pay_alone_does_not_lower_the_top_pick_bar():
+    import render_radar
+
+    from job_hunter.config import FitConfig
+    from job_hunter.dream import DreamDecision
+
+    cfg = FitConfig(enabled=True)
+    judged = {"score": 72, "domain_fit": "core", "seniority_fit": "match", "blockers": []}
+    pay_only = DreamDecision("dream", ("salary: $200,000",))
+    title = DreamDecision("dream", ("title: supervisor", "salary: $200,000"))
+    assert render_radar._fit_decision({}, judged, cfg, pay_only).tier == "likely"
+    assert render_radar._fit_decision({}, judged, cfg, title).tier == "top"
