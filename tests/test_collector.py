@@ -615,3 +615,20 @@ async def test_missing_expected_detail_field_raises_a_warning_not_a_failure(tmp_
     assert health.status.value == "warning" and "department filled for 0/12" in health.message
     with Storage(settings.database_path) as storage:
         assert storage.get_job("fake", "j0") is not None  # jobs are kept
+
+
+class _ListingDeptAdapter(_DepartmentAdapter):
+    fill = False
+
+    async def fetch_detail(self, summary: JobSummary) -> JobDetail:
+        return JobDetail(description="d")
+
+
+@pytest.mark.asyncio
+async def test_missing_expected_listing_field_raises_a_warning(tmp_path):
+    settings = Settings(database_path=tmp_path / "jobs.sqlite3", collection=CollectionConfig())
+    company = CompanyConfig(key="fake", company="Acme", adapter="fake", config={"expect_listing_fields": {"department": 0.7}})
+    with patch("job_hunter.collector.adapter_class", return_value=_ListingDeptAdapter):
+        result = await Collector(settings, [company], CandidateProfile()).search(include_seen=True)
+    [health] = result.source_health
+    assert health.status.value == "warning" and "department filled for 0/12 listing items" in health.message

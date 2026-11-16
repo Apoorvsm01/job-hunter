@@ -275,6 +275,12 @@ class Collector:
                         health, previous_count,
                         int(company.config.get("anomaly_minimum_previous", 20)),
                     )
+                    # A field the listing pass itself should fill (e.g. Workday's job-family facet
+                    # mapped to department); a facet that silently stopped working shows up here.
+                    health = detect_field_coverage(
+                        health, summaries, company.config.get("expect_listing_fields"),
+                        int(company.config.get("expect_detail_min_sample", 10)), what="listing items",
+                    )
                 else:
                     health = SourceHealth(
                         source_key=company.key,

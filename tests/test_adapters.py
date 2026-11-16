@@ -2724,3 +2724,63 @@ async def test_workday_native_detail_reads_end_date_as_application_deadline(end_
     got = detail.application_deadline.isoformat() if detail.application_deadline else None
     assert got == expected
     assert "jobDescription" not in (detail.extras or {})
+
+
+def _workday_facet_mock(list_url, families, *, fail_family=None):
+    """Workday list endpoint: with no applied facet it returns every job plus the facet list; with
+    `jobFamily: [id]` it returns only that family's jobs (as the real CXS endpoint does)."""
+    jobs = {
+        "fam-sys": [("Systems Role", "/job/A/Systems-Role_JR-1"), ("AV Sensing Role", "/job/A/AV_JR-2")],
+        "fam-mfg": [("Plant Role", "/job/B/Plant_JR-3")],
+    }
+
+    def respond(request):
+        body = json.loads(request.content)
+        applied = (body.get("appliedFacets") or {}).get("jobFamily")
+        if applied and applied[0] == fail_family:
+            return httpx.Response(500)
+        chosen = jobs[applied[0]] if applied else [j for js in jobs.values() for j in js]
+        page = chosen[body["offset"] : body["offset"] + body["limit"]]
+        return httpx.Response(200, json={
+            "total": len(chosen),
+            "facets": [{"facetParameter": "jobFamily", "values": [
+                {"id": "fam-sys", "descriptor": "Systems Engineering", "count": 2},
+                {"id": "fam-mfg", "descriptor": "Manufacturing", "count": 1}]}],
+            "jobPostings": [{"title": t, "externalPath": p, "jobId": p.rsplit("_", 1)[1], "postedOn": "Posted Today"} for t, p in page],
+        })
+
+    respx.post(list_url).mock(side_effect=respond)
+
+
+def _workday_dept_company(list_url, **extra):
+    return CompanyConfig(key="tenant", company="Tenant", adapter="workday", config={
+        "workday_native": True, "list_url": list_url, "page_size": 2,
+        "public_base_url": "https://tenant.wd1.myworkdayjobs.com/en-US/site/", **extra})
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_workday_department_facet_maps_each_job_to_its_family_and_is_opt_in():
+    list_url = "https://tenant.wd1.myworkdayjobs.com/wday/cxs/tenant/site/jobs"
+    _workday_facet_mock(list_url, None)
+    async with httpx.AsyncClient() as client:
+        on = WorkdayAdapter(_workday_dept_company(list_url, department_facet="jobFamily"), client, CollectionConfig(max_retries=0))
+        jobs = await on.fetch_summaries()
+        off = WorkdayAdapter(_workday_dept_company(list_url), client, CollectionConfig(max_retries=0))
+        plain = await off.fetch_summaries()
+    assert {j.title: j.department for j in jobs} == {
+        "Systems Role": "Systems Engineering", "AV Sensing Role": "Systems Engineering", "Plant Role": "Manufacturing"}
+    assert all(j.department is None for j in plain)  # off unless configured
+
+
+@pytest.mark.asyncio
+@respx.mock
+@pytest.mark.parametrize("facet,fail", [("jobFamily", "fam-mfg"), ("noSuchFacet", None)])
+async def test_workday_department_facet_failure_never_fails_the_listing(facet, fail):
+    list_url = "https://tenant.wd1.myworkdayjobs.com/wday/cxs/tenant/site/jobs"
+    _workday_facet_mock(list_url, None, fail_family=fail)
+    async with httpx.AsyncClient() as client:
+        adapter = WorkdayAdapter(_workday_dept_company(list_url, department_facet=facet), client, CollectionConfig(max_retries=0))
+        jobs = await adapter.fetch_summaries()
+    assert len(jobs) == 3  # the listing itself is intact
+    assert all(j.department is None for j in jobs)  # a failed pass applies nothing, never a partial map
