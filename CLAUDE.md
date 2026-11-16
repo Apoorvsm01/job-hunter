@@ -179,7 +179,9 @@ ranked `SearchResult` JSON.
   positive pattern). Defaults to `unmentioned` — never guess.
 
 - **`salary.py`** — `evaluate_salary`, same evidence-based never-a-filter pattern, for
-  `Job.salary_min`/`salary_max`/`salary_currency` + `salary_evidence`. One regex: a real two-number
+  `Job.salary_min`/`salary_max`/`salary_currency` + `salary_evidence` (+ `salary_tiers`, migration v8: ranges within 300
+  chars of the first, same hourly/annual kind, are grouped, so min/max span them all and each tier keeps its Level/region
+  wording; the radar dropdown lists them). One regex: a real two-number
   range (`$X` then `-`/`–`/`—`/`to` then a second number, `$` optional on the second). Validated
   against live GM/Honda/Ford/Torc postings plus the full stored pool (~9,500/~30,000 matched, no
   false positive beyond the pattern below). Never matches a bare single dollar figure (Ford's
@@ -306,8 +308,13 @@ ranked `SearchResult` JSON.
   empties and the description fields dropped, strings over 2000 chars dropped (key listed in `_omitted_long`), total capped
   ~20KB. The listing item is recaptured every run (`collector._job_extras`); the detail part only when a detail is fetched
   (the stored one is kept otherwise). Detail capture is in `ConfigurableJsonAdapter.fetch_detail` (Oracle/Ford, Greenhouse,
-  Lever, Ashby, ... inherit it) and Workday native; **adapters that build their own `JobDetail` (eightfold, bosch, apple,
-  csod, adp, ... and every HTML adapter) don't capture detail extras yet** — add `extras=compact_extras(...)`. Never in
+  Lever, Ashby, SmartRecruiters, iCIMS ... inherit it), Workday native, and every adapter that builds its own `JobDetail`:
+  eightfold/apple/ultipro (the record minus its description), bosch (the job ad minus its section texts), csod/brose/phenom/
+  `html_paginated` and its subclasses zf/html_multi_index/stealth_html (the page's JSON-LD minus its text), paycom (record
+  plus its parsed `googleJobJson`), successfactors_rmk_v2 (the other label->value tokens), paylocity (every other labelled
+  section). Nothing to capture beyond the listing item (which the collector always keeps): dayforce and adp_recruiting.
+  A **new adapter that builds its own `JobDetail` must pass `extras=compact_extras(payload, skip_keys=(description keys))`**
+  (`tests/test_adapter_extras.py` is the pattern). Never in
   archives (`Job.extras` is `exclude=True`), never a filter, never in `content_hash`. Existing jobs have none until their
   detail is refetched once (`search --companies X --refresh-details`).
 - **Field mappings and their health check** (`docs/SPEC.md` §3.5) — Ford's `department` is the detail call's `Category`
@@ -315,6 +322,15 @@ ranked `SearchResult` JSON.
   `expect_detail_fields: {department: 0.5}` makes `health.detect_field_coverage` raise a `warning` when freshly fetched
   details stop carrying a field (min sample 10), so an upstream rename can't silently blank a mapped field. A detail-only
   field is kept from the stored row on runs that skip the detail fetch (`collector.py` falls back to `prior[...]`).
+- **Source field audit** (`docs/SPEC.md` §3.5): Caterpillar/Valeo carry a Workday `endDate` (read), Nvidia states its
+  level in pay text ("USD for Level 4"; a rule needs your threshold), Stellantis exposes nothing beyond the description
+  (its ADP listing item is now kept in `extras`), and Workday's `jobFamily` facets are the only department source for
+  Workday sites (not built).
+- **Workday department facet** — `department_facet: jobFamily` (opt-in, **GM only**) makes `WorkdayAdapter` query each family
+  facet once and set `department` by `externalPath`; `expect_listing_fields` warns if it stops filling. Measured before
+  enabling (GM +18/-0; Nvidia +25/-16 because of a family named "Program Manager"; Caterpillar/Valeo nothing), so don't
+  switch it on elsewhere without re-running that measurement. `prefilter.gate_text_for` joins title and department with
+  `" | "`: a plain space let a term straddle the boundary ("...Air Systems" + "Engineering" matched "systems engineering").
 - **Dream levels** (`radar.dream.levels`, `{source_key: [LevelRule]}`) — per-source minimum job level for the Dream tag, read
   from posting text by a one-capture-group regex; a source can have several schemes, and a rule may carry
   `min_salary_usd` (level counts only when the job's top USD salary reaches it). Ford: LL4+ (`fordcareers.co/LL(\d+)`,
