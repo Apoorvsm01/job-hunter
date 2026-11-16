@@ -64,7 +64,7 @@ import review_with_lm_studio as reviewer  # noqa: E402  (reuses the real prompt 
 
 from job_hunter.atomic import atomic_write_text  # noqa: E402
 from job_hunter.config import load_profile  # noqa: E402
-from job_hunter.lm_studio_health import load_lm_studio_config  # noqa: E402
+from job_hunter.lm_studio_health import REASONING_FIELDS, load_lm_studio_config  # noqa: E402
 from job_hunter.review_prompt import (  # noqa: E402
     ModelVerdict,
     apply_caps,
@@ -84,7 +84,7 @@ RESULT_COLUMNS = [
     "auc", "neg_ge70", "pos_ge70", "pos_ge75", "pos_ge80", "neg_off", "pos_off",
     "valid_first_try", "valid_final", "median_secs", "total_min", "median_out_tokens",
 ]
-MODE_FIELDS: dict[str, dict[str, Any]] = {"off": {"reasoning_effort": "none"}, "low": {"reasoning_effort": "low"}, "default": {}}
+MODE_FIELDS = REASONING_FIELDS  # the same switch the real review uses (`reasoning:` in config/lm_studio.yaml)
 STAGE = {"off": 0, "low": 1, "default": 2}
 
 

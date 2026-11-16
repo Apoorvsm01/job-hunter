@@ -371,7 +371,8 @@ ranked `SearchResult` JSON.
   (hardware, prompt commit, golden id; never a company, title or job key) to `docs/bakeoff/results.csv` + `RESULTS.md`; per-job output
   stays in git-ignored `data/golden/`. `tests/test_bakeoff_models.py` fails if a golden title or key leaks into `docs/bakeoff/`. Compare
   a new model by running it together with the current default on the same golden set and prompt, never against rows whose `golden_id`
-  or `prompt_commit` differ. See `docs/bakeoff/README.md`.
+  or `prompt_commit` differ. See `docs/bakeoff/README.md`. The review reads `reasoning: off|low|default` from `config/lm_studio.yaml`
+  (sent as `reasoning_effort`; a bare YAML `off` parses to `False` and is handled) and retries a malformed answer once.
 - **`cleanup` keeps jobs you acted on** — `find_stale_closed_jobs` skips any job with an `applications` row or a `job_feedback` label.
 - **`scripts/refilter_archive.py`** — answers "what would this already-collected archive's
   candidates look like under the *current* profile," no network. Rebuilds `candidates` from

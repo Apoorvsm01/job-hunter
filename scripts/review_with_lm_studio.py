@@ -37,7 +37,7 @@ from pydantic import ValidationError
 from job_hunter.active_pool import fallback_candidates
 from job_hunter.atomic import atomic_write_text
 from job_hunter.config import CandidateProfile, load_profile, load_settings
-from job_hunter.lm_studio_health import check_lm_studio, load_lm_studio_config
+from job_hunter.lm_studio_health import check_lm_studio, load_lm_studio_config, reasoning_fields
 from job_hunter.models import Assessment
 from job_hunter.resume_source import resolve_master_resume
 from job_hunter.review_prompt import (
@@ -165,39 +165,47 @@ def review_one(
     threshold: int = 75,
     context: str = "",
 ) -> dict[str, Any]:
-    """Send exactly one job to the local model and return its parsed, validated verdict."""
-    response = client.post(
-        f"{config['base_url'].rstrip('/')}/chat/completions",
-        json={
-            "model": config.get("model", "local-model"),
-            "temperature": config.get("temperature", 0.2),
-            "messages": [
-                {
-                    "role": "system",
-                    "content": _SYSTEM_PROMPT.format(rubric=rubric, threshold=threshold, context=context),
-                },
-                {
-                    "role": "user",
-                    "content": _USER_PROMPT.format(
-                        resume=resume,
-                        title=title,
-                        company=company,
-                        location=location,
-                        url=url,
-                        description=description or "(no description available)",
-                    ),
-                },
-            ],
-        },
-        timeout=config.get("timeout_seconds", 180),
-    )
-    response.raise_for_status()
-    content = response.json()["choices"][0]["message"]["content"]
-    raw_verdict = _extract_json(content)
-    try:
-        verdict = ModelVerdict.model_validate(raw_verdict)
-    except ValidationError as exc:
-        raise ValueError(f"model verdict failed schema validation: {exc}") from exc
+    """Send exactly one job to the local model and return its parsed, validated verdict.
+    A malformed answer (not JSON, or failing the schema) gets exactly one retry: with thinking off a model
+    slips on the format now and then. An HTTP/timeout error is raised at once, never retried here."""
+    body = {
+        "model": config.get("model", "local-model"),
+        "temperature": config.get("temperature", 0.2),
+        "messages": [
+            {
+                "role": "system",
+                "content": _SYSTEM_PROMPT.format(rubric=rubric, threshold=threshold, context=context),
+            },
+            {
+                "role": "user",
+                "content": _USER_PROMPT.format(
+                    resume=resume,
+                    title=title,
+                    company=company,
+                    location=location,
+                    url=url,
+                    description=description or "(no description available)",
+                ),
+            },
+        ],
+        **reasoning_fields(config),
+    }
+    last_error: ValueError | None = None
+    for _attempt in (1, 2):
+        response = client.post(
+            f"{config['base_url'].rstrip('/')}/chat/completions", json=body, timeout=config.get("timeout_seconds", 180)
+        )
+        response.raise_for_status()
+        content = re.sub(r"<think>.*?</think>", "", response.json()["choices"][0]["message"]["content"] or "", flags=re.S)
+        try:
+            verdict = ModelVerdict.model_validate(_extract_json(content))
+            break
+        except ValidationError as exc:
+            last_error = ValueError(f"model verdict failed schema validation: {exc}")
+        except ValueError as exc:  # not JSON (json.JSONDecodeError is a ValueError)
+            last_error = exc
+    else:
+        raise last_error  # type: ignore[misc]
     return apply_caps(verdict.model_dump(), threshold=threshold)
 
 

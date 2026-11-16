@@ -154,3 +154,77 @@ def test_resolve_resume_falls_back_to_the_profile_path_and_errors_when_neither_e
     assert resolve_resume(profile, tmp_path)[1] == "profile resume"
     with pytest.raises(FileNotFoundError):
         resolve_resume(CandidateProfile(), tmp_path / "empty")
+
+
+# ------------------------------------------------------------------ reasoning switch and format retry
+
+
+def test_reasoning_config_maps_to_request_fields_and_rejects_unknown_values():
+    import pytest
+
+    from job_hunter.lm_studio_health import reasoning_fields
+
+    assert reasoning_fields({}) == {} and reasoning_fields({"reasoning": "default"}) == {}
+    assert reasoning_fields({"reasoning": "off"}) == {"reasoning_effort": "none"}
+    assert reasoning_fields({"reasoning": " LOW "}) == {"reasoning_effort": "low"}
+    # a bare `reasoning: off` in YAML parses to the boolean False; that must still switch thinking off
+    import yaml
+
+    assert reasoning_fields(yaml.safe_load("reasoning: off")) == {"reasoning_effort": "none"}
+    assert reasoning_fields(yaml.safe_load('reasoning: "off"')) == {"reasoning_effort": "none"}
+    assert reasoning_fields({"reasoning": True}) == {}
+    with pytest.raises(ValueError):
+        reasoning_fields({"reasoning": "fast"})
+
+
+class _Resp:
+    def __init__(self, content):
+        self._content = content
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return {"choices": [{"message": {"content": self._content}}]}
+
+
+class _ScriptedClient:
+    def __init__(self, answers):
+        self.answers, self.bodies = list(answers), []
+
+    def post(self, url, json=None, timeout=0):
+        self.bodies.append(json)
+        return _Resp(self.answers.pop(0))
+
+
+_GOOD = ('{"domain_fit":"core","seniority_fit":"match","blockers":[],"matches":["a","b"],"gaps":["c"],"score":80,"recommended":true}')
+
+
+def _review(client, **config):
+    import review_with_lm_studio as r
+
+    return r.review_one(client, {"base_url": "http://x/v1", **config}, resume="R", rubric="rubric", title="T", company="C",
+                        location="L", url="u", description="d")
+
+
+def test_review_sends_thinking_off_when_configured():
+    client = _ScriptedClient([_GOOD])
+    assert _review(client, reasoning="off")["score"] == 80
+    assert client.bodies[0]["reasoning_effort"] == "none"
+    plain = _ScriptedClient([_GOOD])
+    _review(plain)
+    assert "reasoning_effort" not in plain.bodies[0]
+
+
+def test_review_retries_a_malformed_answer_once_and_strips_think_blocks():
+    client = _ScriptedClient(["not json at all", "<think>hmm</think>" + _GOOD])
+    assert _review(client)["score"] == 80 and len(client.bodies) == 2
+
+
+def test_review_gives_up_after_the_second_malformed_answer():
+    import pytest
+
+    client = _ScriptedClient(["nope", '{"domain_fit":"core"}'])
+    with pytest.raises(ValueError):
+        _review(client)
+    assert len(client.bodies) == 2

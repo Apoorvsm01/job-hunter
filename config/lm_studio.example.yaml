@@ -12,3 +12,10 @@ model: local-model
 # Generous timeout: local inference on modest hardware can take well over a minute per job.
 timeout_seconds: 180
 temperature: 0.2
+
+# Thinking mode, from the bake-off in docs/bakeoff/ (reasoning models spend ~90% of their time thinking):
+#   off     (write it bare or quoted) = reasoning_effort "none": about 10x faster; the review prompt's judgments-first JSON keeps quality.
+#   low     = only for models that list it (check LM Studio's model page); others silently fall back to on.
+#   default = send nothing; the model keeps its own setting (usually full thinking).
+# Pick the model and mode with `scripts/bakeoff_models.py` on your own hardware. A malformed answer is retried once.
+reasoning: default

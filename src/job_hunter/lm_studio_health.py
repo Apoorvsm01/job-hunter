@@ -17,6 +17,22 @@ from typing import Any
 import httpx
 import yaml
 
+# `reasoning:` in config/lm_studio.yaml -> extra request fields. Only "off" is a real switch on LM Studio today:
+# `reasoning_effort: "none"` turns thinking off (about 10x faster); `/no_think` and chat_template_kwargs do nothing.
+# "low" is honoured only by models that list it (others silently fall back to on). Absent/"default" sends nothing,
+# so the model keeps its own setting.
+REASONING_FIELDS: dict[str, dict[str, Any]] = {"off": {"reasoning_effort": "none"}, "low": {"reasoning_effort": "low"}, "default": {}}
+
+
+def reasoning_fields(config: dict[str, Any]) -> dict[str, Any]:
+    """Request fields for the configured `reasoning` mode; an unknown value is an error, never silently ignored."""
+    raw = config.get("reasoning")
+    # YAML 1.1 reads a bare `off`/`on` as a boolean: False must mean "off" (it silently meant "default" once), True "default".
+    mode = "off" if raw is False else "default" if raw is True or raw is None or raw == "" else str(raw).strip().lower()
+    if mode not in REASONING_FIELDS:
+        raise ValueError(f"lm_studio.yaml: reasoning must be one of {sorted(REASONING_FIELDS)}, got {mode!r}")
+    return dict(REASONING_FIELDS[mode])
+
 
 def load_lm_studio_config(path: Path) -> dict[str, Any]:
     """Load `config/lm_studio.yaml`, falling back to `lm_studio.example.yaml` (whose placeholder
