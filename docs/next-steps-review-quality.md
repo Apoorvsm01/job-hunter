@@ -62,10 +62,19 @@ Sample = 14 acted-on + 14 irrelevant + 10 other previously-75+ jobs. Harness: `d
      night. Resumable with `--resume <dir>`; `--plan` shows the plan; `--report-only <dir>` rebuilds a report.
      It holds the shared `job-hunter` run lock (a pipeline run cannot overlap it) and unloads other models first.
      Output: `data/golden/bakeoff/<run-id>/` (`run.log` is the live progress).
-   - **Models:** `qwen/qwen3.6-35b-a3b` (current), `qwen/qwen3.6-27b`, `qwen/qwen3.8-27b` (its default reasoning is `xhigh`, so
-     expect `default` to hit the budget), `qwen/qwen3-4b-2507` (no thinking switch, one run), `qwen/qwen3-4b` (off/default),
-     `google/gemma-4-31b-qat` (skipped until it is on disk: `lms ls` did not list it on 2026-11-16; rerun
-     `--models google/gemma-4-31b-qat` later, or all of them with `--resume`).
+   - **Models:** every LLM on disk by default (`--models a/b,c/d` to pick). The first run covered `qwen/qwen3.6-35b-a3b`
+     (then the default), `qwen/qwen3.6-27b`, `qwen/qwen3.8-27b`, `qwen/qwen3-4b-2507`, `qwen/qwen3-4b` and `google/gemma-4-31b-qat`.
+   - **Outcome (2026-11-16, M5 Max 128 GB):** `google/gemma-4-31b-qat` with thinking **off** is the pick: AUC 0.991, 0 of 57
+     irrelevant jobs at 70 or more, 26 of 34 wanted jobs at 70 or more, about 11 s/job (the thinking run was 71 s/job and did not
+     finish in budget). Runs that could not finish the golden set in 90 minutes (every thinking-on run of the 27B/35B Qwens and
+     Gemma's thinking-on run) are **off the table** and marked "did not finish" in the report; the last two (qwen3.6-27b and
+     qwen3.6-35b-a3b with thinking on) were stopped by hand because they could not finish. A repeat Gemma-off run was
+     started to confirm. Not yet done: make the review use it (needs a `reasoning_effort` setting passed by
+     `review_with_lm_studio.py`; today the config has only `model`).
+   - **Publishing and reuse:** `docs/bakeoff/` holds the how-to (`README.md`) and the aggregate results (`results.csv`,
+     `RESULTS.md`, no job names). `--publish <run-dir>` appends rows; each carries chip, RAM, model size, context, prompt commit,
+     skill version and golden-set id so a later model can be compared on the same hardware and prompt. A test fails if a golden
+     job title or key appears in a tracked file there.
    - **Reasoning switch facts (measured):** `reasoning_effort: "none"` turns thinking off on LM Studio (5 s and ~440 output
      tokens vs 54 s and ~4,950). `/no_think` in the prompt and `chat_template_kwargs.enable_thinking=false` do nothing.
      LM Studio rejects `low` on models that only list `on`/`off` (it silently falls back to `on`), so `low` is only run

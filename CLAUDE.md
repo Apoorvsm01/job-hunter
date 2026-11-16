@@ -364,6 +364,14 @@ ranked `SearchResult` JSON.
   Dream; live pages filter through `radar_live_core.js` facts (the static template's JS anchors do not exist there).
   Calibration lesson (gold set = your interviews/applications): `strong_relevance_terms` evidence and title similarity to acted-on
   jobs *lowered* recall (12/24 vs 16/24 at score>=75) and removed none of the irrelevant jobs, so neither is a gate or a tier input.
+- **Model bake-off** (`scripts/bakeoff_models.py`, `scripts/build_golden_jobs.py`, `docs/bakeoff/`) — compares local LM Studio models and
+  thinking modes (`off` = `reasoning_effort: "none"`, the only switch that works; `/no_think` does nothing) on a golden set built from your
+  own applications and labels (positives = acted on, negatives = tagged irrelevant), through the real review prompt. A run that cannot
+  finish inside its time budget is **did-not-finish**: listed apart, no quality numbers, off the table. `--publish` appends aggregates only
+  (hardware, prompt commit, golden id; never a company, title or job key) to `docs/bakeoff/results.csv` + `RESULTS.md`; per-job output
+  stays in git-ignored `data/golden/`. `tests/test_bakeoff_models.py` fails if a golden title or key leaks into `docs/bakeoff/`. Compare
+  a new model by running it together with the current default on the same golden set and prompt, never against rows whose `golden_id`
+  or `prompt_commit` differ. See `docs/bakeoff/README.md`.
 - **`cleanup` keeps jobs you acted on** — `find_stale_closed_jobs` skips any job with an `applications` row or a `job_feedback` label.
 - **`scripts/refilter_archive.py`** — answers "what would this already-collected archive's
   candidates look like under the *current* profile," no network. Rebuilds `candidates` from

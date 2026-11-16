@@ -24,6 +24,14 @@ the prompt excludes the golden jobs themselves, so a model never sees the answer
     uv run python scripts/bakeoff_models.py --models qwen/qwen3-4b-2507 --limit 6    # quick smoke test
     uv run python scripts/bakeoff_models.py --report-only data/golden/bakeoff/<run-id>
     uv run python scripts/bakeoff_models.py --resume data/golden/bakeoff/<run-id>     # continue a stopped night
+    uv run python scripts/bakeoff_models.py --publish data/golden/bakeoff/<run-id>    # aggregates -> docs/bakeoff/
+
+A run that did NOT finish inside its time budget is off the table: it is listed apart as "did not finish" with no
+quality numbers, because a partial sample is not comparable with a complete one.
+
+Publishing: `--publish <run-dir> [<run-dir> ...]` appends AGGREGATE rows only (no company, title or job key) to
+docs/bakeoff/results.csv and rebuilds docs/bakeoff/RESULTS.md, so a result can be shared and compared with future
+models on the same hardware. The per-job matrix and the golden set stay local (data/ is git-ignored).
 
 It takes the shared "job-hunter" run lock, so it cannot overlap a pipeline/review run that would fight it
 for the model; it unloads whatever else is loaded first. Stop it with Ctrl+C (the loaded model is unloaded).
@@ -33,7 +41,11 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
+import io
 import json
+import os
+import platform
 import random
 import re
 import shutil
@@ -64,13 +76,13 @@ from job_hunter.rootutil import add_project_argument, chdir_to_project_root  # n
 from job_hunter.runlock import RunLockHeld, run_lock  # noqa: E402
 
 GOLDEN = Path("data/golden/golden_jobs.json")
-DEFAULT_MODELS = [
-    "qwen/qwen3.6-35b-a3b",       # current default (baseline)
-    "qwen/qwen3.6-27b",
-    "qwen/qwen3.8-27b",
-    "qwen/qwen3-4b-2507",
-    "qwen/qwen3-4b",
-    "google/gemma-4-31b-qat",     # skipped automatically until it is on disk
+RESULTS_CSV = Path("docs/bakeoff/results.csv")
+RESULTS_MD = Path("docs/bakeoff/RESULTS.md")
+RESULT_COLUMNS = [
+    "run_id", "run_date", "chip", "ram_gb", "hardware_note", "model", "model_gb", "mode", "context", "prompt_commit", "skill_version",
+    "golden_id", "golden_jobs", "golden_positive", "golden_negative", "status", "jobs_done", "jobs_target",
+    "auc", "neg_ge70", "pos_ge70", "pos_ge75", "pos_ge80", "neg_off", "pos_off",
+    "valid_first_try", "valid_final", "median_secs", "total_min", "median_out_tokens",
 ]
 MODE_FIELDS: dict[str, dict[str, Any]] = {"off": {"reasoning_effort": "none"}, "low": {"reasoning_effort": "low"}, "default": {}}
 STAGE = {"off": 0, "low": 1, "default": 2}
@@ -210,6 +222,61 @@ def review(client: httpx.Client, cfg: dict[str, Any], model: str, mode: str, job
     return result
 
 
+# ------------------------------------------------------------------------------------- environment
+
+
+def hardware(note: str = "") -> dict[str, Any]:
+    """Chip and memory of this machine, recorded with every run so a result can be matched to hardware."""
+    chip, ram = "", None
+    try:
+        if sys.platform == "darwin":
+            chip = subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True, check=False).stdout.strip()
+            ram = int(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, check=False).stdout.strip()) / 2**30
+        else:
+            chip = platform.processor()
+            ram = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 2**30
+    except (OSError, ValueError, AttributeError):
+        pass
+    return {"chip": chip or platform.machine(), "ram_gb": round(ram) if ram else None, "os": f"{platform.system()} {platform.release()}", "note": note}
+
+
+def prompt_identity() -> dict[str, str]:
+    """Which review prompt produced the numbers: the repo commit (marked `-dirty` if the prompt files have
+    uncommitted edits) and the job-reviewer skill version."""
+    paths = ["scripts/review_with_lm_studio.py", "src/job_hunter/review_prompt.py", "skills/job-reviewer"]
+    try:
+        commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, check=False).stdout.strip()
+        dirty = subprocess.run(["git", "status", "--porcelain", "--", *paths], capture_output=True, text=True, check=False).stdout.strip()
+    except OSError:
+        commit, dirty = "", ""
+    skill = ""
+    skill_file = Path("skills/job-reviewer/SKILL.md")
+    if skill_file.exists():
+        found = re.search(r"^version:\s*(\S+)", skill_file.read_text(encoding="utf-8"), re.M)
+        skill = found.group(1) if found else ""
+    return {"commit": (commit + "-dirty") if commit and dirty else commit or "unknown", "skill_version": skill}
+
+
+def golden_id(golden: list[dict[str, Any]]) -> str:
+    """Short fingerprint of the golden set (keys + outcomes): same id = same questions, comparable scores."""
+    text = "\n".join(sorted(f"{j['key']}={j['outcome']}" for j in golden))
+    return hashlib.sha256(text.encode()).hexdigest()[:10]
+
+
+def run_meta(golden: list[dict[str, Any]], *, context_length: int, note: str) -> dict[str, Any]:
+    return {
+        "created_at": datetime.now().astimezone().isoformat(timespec="seconds"), "hardware": hardware(note),
+        "prompt": prompt_identity(), "context_length": context_length, "golden_id": golden_id(golden),
+        "golden_jobs": len(golden), "golden_positive": sum(j["group"] == "positive" for j in golden),
+        "golden_negative": sum(j["group"] == "negative" for j in golden),
+    }
+
+
+def is_complete(run: dict[str, Any], target: int) -> bool:
+    """Every golden job was attempted before the run budget or the deadline stopped it."""
+    return not run.get("stopped_reason") and len(run["jobs"]) >= target
+
+
 # ------------------------------------------------------------------------------------- reporting
 
 
@@ -245,18 +312,19 @@ def summarize(run: dict[str, Any], group_of: dict[str, str], outcome_of: dict[st
 def write_report(out_dir: Path, golden: list[dict[str, Any]], plan: list[tuple[str, str]], note: str = "") -> None:
     group_of = {j["key"]: j["group"] for j in golden}
     outcome_of = {j["key"]: j["outcome"] for j in golden}
-    runs = []
-    for f in sorted((out_dir / "runs").glob("*.json")):
-        runs.append(json.loads(f.read_text()))
-    rows = [summarize(r, group_of, outcome_of) for r in runs]
+    all_runs = [json.loads(f.read_text()) for f in sorted((out_dir / "runs").glob("*.json"))]
+    complete = [r for r in all_runs if is_complete(r, len(golden))]
+    unfinished = [r for r in all_runs if not is_complete(r, len(golden))]
+    rows = [summarize(r, group_of, outcome_of) for r in complete]
     rows.sort(key=lambda r: (-(r["auc"] or 0), r["median_secs"] or 1e9))
+    runs = complete
     cols = ["model", "mode", "done", "target", "valid_first_try", "valid_final", "median_secs", "total_min", "median_out_tokens",
-            "auc", "neg_ge70", "pos_ge70", "pos_ge75", "pos_ge80", "neg_off", "pos_off", "stopped"]
+            "auc", "neg_ge70", "pos_ge70", "pos_ge75", "pos_ge80", "neg_off", "pos_off"]
     with open(out_dir / "summary.csv", "w", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=cols, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
-    # per-job matrix: one column per run, "score domain" each
+    # per-job matrix (local only): one column per COMPLETE run, "score domain" each
     labels = [f"{r['model'].split('/')[-1]}|{r['mode']}" for r in runs]
     matrix = []
     for job in golden:
@@ -273,17 +341,110 @@ def write_report(out_dir: Path, golden: list[dict[str, Any]], plan: list[tuple[s
     lines = [f"# Model bake-off report ({datetime.now().astimezone():%Y-%m-%d %H:%M})", "",
              f"Golden jobs: {len(golden)} ({sum(g['group']=='positive' for g in golden)} positive, "
              f"{sum(g['group']=='negative' for g in golden)} negative, {sum(g['group']=='neutral' for g in golden)} neutral). "
-             f"Runs finished or in progress: {len(runs)} of {len(plan)} planned. {note}", "",
+             f"Complete runs: {len(complete)}; did not finish: {len(unfinished)}; planned: {len(plan)}. {note}", "",
              "AUC = chance a positive (offer/interview/applied/saved/...) outscores a negative (tagged irrelevant); 1.0 is perfect, 0.5 is chance.",
              "`neg_ge70` is the noise that still reaches 'Likely fit'; `pos_ge70/75/80` is how many jobs you wanted that stay visible; `pos_off` is wanted jobs wrongly called off-domain.", "",
              "| " + " | ".join(cols) + " |", "|" + "---|" * len(cols)]
     lines += ["| " + " | ".join(str(r.get(c, "")) for c in cols) + " |" for r in rows]
-    lines += ["", "## Mean score by outcome", "", "| run | " + " | ".join(sorted(set(outcome_of.values()))) + " |", "|" + "---|" * (1 + len(set(outcome_of.values())))]
+    if unfinished:
+        lines += ["", "## Did not finish in the time budget: EXCLUDED from the comparison", "",
+                  "These runs were too slow to score the whole golden set inside the run budget. A partial sample is not comparable with a",
+                  "complete one, so no quality numbers are shown. Too slow for this workflow = off the table.", "",
+                  "| model | mode | jobs done | median secs/job | stopped by |", "|---|---|---|---|---|"]
+        for r in sorted(unfinished, key=lambda r: (r["model"], r["mode"])):
+            u = summarize(r, group_of, outcome_of)
+            lines.append(f"| {r['model']} | {r['mode']} | {u['done']}/{u['target']} | {u['median_secs']} | {u['stopped'] or 'not started to the end'} |")
+    outcomes = sorted(set(outcome_of.values()))
+    lines += ["", "## Mean score by outcome", "", "| run | " + " | ".join(outcomes) + " |", "|" + "---|" * (1 + len(outcomes))]
     for r in rows:
-        lines.append(f"| {r['model'].split('/')[-1]} {r['mode']} | " + " | ".join(str(r["mean_by_outcome"].get(o, "")) for o in sorted(set(outcome_of.values()))) + " |")
-    lines += ["", "## Per-job comparison (score and domain call per run; see matrix.csv)", "", "| outcome | company | title | " + " | ".join(labels) + " |", "|" + "---|" * (3 + len(labels))]
+        lines.append(f"| {r['model'].split('/')[-1]} {r['mode']} | " + " | ".join(str(r["mean_by_outcome"].get(o, "")) for o in outcomes) + " |")
+    lines += ["", "## Per-job comparison (complete runs; score and domain call per run; see matrix.csv)", "", "| outcome | company | title | " + " | ".join(labels) + " |", "|" + "---|" * (3 + len(labels))]
     lines += ["| " + " | ".join([m["outcome"], m["company"][:14], m["title"][:42], *[str(m[label]) for label in labels]]) + " |" for m in matrix]
     atomic_write_text(out_dir / "report.md", "\n".join(lines) + "\n")
+
+
+# ------------------------------------------------------------------------------------- publishing
+
+
+def result_rows(out_dir: Path, golden: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Aggregate-only rows for docs/bakeoff/results.csv: no company, title, job key or per-job score."""
+    meta_file = out_dir / "meta.json"
+    if not meta_file.exists():
+        raise SystemExit(f"job-hunter: {meta_file} is missing; this run predates the metadata. Create it first (see docs/bakeoff/README.md).")
+    meta = json.loads(meta_file.read_text())
+    group_of = {j["key"]: j["group"] for j in golden}
+    outcome_of = {j["key"]: j["outcome"] for j in golden}
+    if golden_id(golden) != meta["golden_id"]:
+        raise SystemExit("job-hunter: the golden set changed since this run; its results no longer match it. Publish from the saved report instead.")
+    rows = []
+    for f in sorted((out_dir / "runs").glob("*.json")):
+        run = json.loads(f.read_text())
+        u = summarize(run, group_of, outcome_of)
+        finished = is_complete(run, len(golden))
+        hw = meta["hardware"]
+        rows.append({
+            "run_id": out_dir.name, "run_date": meta["created_at"][:10], "chip": hw["chip"], "ram_gb": hw["ram_gb"], "hardware_note": hw.get("note", ""),
+            "model": run["model"], "model_gb": (meta.get("model_gb") or {}).get(run["model"], ""), "mode": run["mode"],
+            "context": meta["context_length"], "prompt_commit": meta["prompt"]["commit"],
+            "skill_version": meta["prompt"]["skill_version"], "golden_id": meta["golden_id"], "golden_jobs": meta["golden_jobs"],
+            "golden_positive": meta["golden_positive"], "golden_negative": meta["golden_negative"],
+            "status": "complete" if finished else "did-not-finish", "jobs_done": u["done"], "jobs_target": u["target"],
+            # quality numbers only for a complete run: a partial sample is not comparable
+            **{c: (u[c] if finished else "") for c in ("auc", "neg_ge70", "pos_ge70", "pos_ge75", "pos_ge80", "neg_off", "pos_off", "valid_first_try", "valid_final")},
+            "median_secs": u["median_secs"], "total_min": u["total_min"], "median_out_tokens": u["median_out_tokens"],
+        })
+    return rows
+
+
+def publish(out_dirs: list[Path], golden: list[dict[str, Any]]) -> int:
+    existing: list[dict[str, str]] = []
+    if RESULTS_CSV.exists():
+        with open(RESULTS_CSV, newline="") as fh:
+            existing = list(csv.DictReader(fh))
+    have = {(r["run_id"], r["model"], r["mode"]) for r in existing}
+    added = 0
+    for out_dir in out_dirs:
+        for row in result_rows(out_dir, golden):
+            if (row["run_id"], row["model"], row["mode"]) in have:
+                continue  # append-only: a published row is never rewritten
+            existing.append({k: str(row[k]) for k in RESULT_COLUMNS})
+            have.add((row["run_id"], row["model"], row["mode"]))
+            added += 1
+    RESULTS_CSV.parent.mkdir(parents=True, exist_ok=True)
+    sink = io.StringIO()
+    writer = csv.DictWriter(sink, fieldnames=RESULT_COLUMNS, lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(existing)
+    atomic_write_text(RESULTS_CSV, sink.getvalue())
+    atomic_write_text(RESULTS_MD, render_results_md(existing))
+    print(f"Published {added} new row(s) ({len(existing)} total): {RESULTS_CSV}, {RESULTS_MD}")
+    return 0
+
+
+def render_results_md(rows: list[dict[str, str]]) -> str:
+    groups: dict[tuple[str, ...], list[dict[str, str]]] = {}
+    for r in rows:
+        groups.setdefault((r["chip"], r["ram_gb"], r["hardware_note"], r["golden_id"], r["prompt_commit"]), []).append(r)
+    lines = ["# Local-model bake-off results", "",
+             "Generated from `results.csv` by `scripts/bakeoff_models.py --publish`; do not edit by hand. Aggregates only: no company, title or",
+             "job appears here. See [README.md](README.md) for how to read, run and reproduce this, and for the caveats.", ""]
+    for (chip, ram, note, gid, commit), grp in groups.items():
+        first = grp[0]
+        lines += [f"## {chip}, {ram} GB{(' (' + note + ')') if note else ''}", "",
+                  f"Run {first['run_date']}, review prompt `{commit}` (job-reviewer {first['skill_version']}), context {first['context']}, golden set `{gid}` "
+                  f"({first['golden_jobs']} jobs: {first['golden_positive']} wanted, {first['golden_negative']} tagged irrelevant).", "",
+                  "| run | model | size GB | thinking | AUC | irrelevant ≥70 | wanted ≥70 | wanted ≥75 | wanted ≥80 | wanted called off-domain | secs/job (median) | total min |",
+                  "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+        done = sorted([r for r in grp if r["status"] == "complete"], key=lambda r: (-float(r["auc"] or 0), float(r["median_secs"] or 1e9)))
+        for r in done:
+            lines.append(f"| {r['run_id']} | {r['model']} | {r['model_gb']} | {r['mode']} | {r['auc']} | {r['neg_ge70']} | {r['pos_ge70']} | {r['pos_ge75']} | {r['pos_ge80']} | {r['pos_off']} | {r['median_secs']} | {r['total_min']} |")
+        dnf = [r for r in grp if r["status"] != "complete"]
+        if dnf:
+            lines += ["", "**Did not finish inside the time budget: excluded, no quality numbers (a partial sample is not comparable).**", "",
+                      "| run | model | thinking | jobs done | secs/job (median) |", "|---|---|---|---|---|"]
+            lines += [f"| {r['run_id']} | {r['model']} | {r['mode']} | {r['jobs_done']}/{r['jobs_target']} | {r['median_secs']} |" for r in dnf]
+        lines.append("")
+    return "\n".join(lines) + "\n"
 
 
 # ----------------------------------------------------------------------------------------- driver
@@ -291,7 +452,7 @@ def write_report(out_dir: Path, golden: list[dict[str, Any]], plan: list[tuple[s
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--models", default=",".join(DEFAULT_MODELS), help="comma-separated LM Studio model keys")
+    parser.add_argument("--models", default="all", help="comma-separated LM Studio model keys, or 'all' (default) for every LLM on disk")
     parser.add_argument("--modes", default=None, help="restrict to these modes (off,low,default)")
     parser.add_argument("--limit", type=int, default=None, help="only the first N golden jobs (balanced); for smoke tests")
     parser.add_argument("--run-budget-minutes", type=float, default=90, help="stop one run after this long (default 90)")
@@ -301,6 +462,9 @@ def main() -> int:
     parser.add_argument("--out-dir", type=Path, default=None)
     parser.add_argument("--resume", type=Path, default=None, help="continue a previous output directory")
     parser.add_argument("--report-only", type=Path, default=None, help="rebuild the report of an output directory and exit")
+    parser.add_argument("--publish", type=Path, nargs="+", default=None, metavar="RUN_DIR",
+                        help="append the aggregate results of these run directories to docs/bakeoff/ and exit (no per-job data)")
+    parser.add_argument("--hardware-note", default="", help="free text stored with the run, e.g. 'RTX 4090 24GB' (GPU is not auto-detected off macOS)")
     parser.add_argument("--plan", action="store_true", help="print the plan and exit")
     parser.add_argument("--keep-loaded", action="store_true", help="leave the last model loaded at the end")
     add_project_argument(parser)
@@ -312,10 +476,19 @@ def main() -> int:
     cfg = load_lm_studio_config(Path("config/lm_studio.yaml"))
     root = _root(cfg["base_url"])
     wanted = [m.strip() for m in args.models.split(",") if m.strip()]
+    pos = sum(j["group"] == "positive" for j in golden)
+    neg = sum(j["group"] == "negative" for j in golden)
+    if not args.limit and (pos < 8 or neg < 8):
+        raise SystemExit(f"job-hunter: the golden set has {pos} wanted and {neg} irrelevant jobs; the comparison needs at least 8 of each "
+                         "(save/apply to jobs and tag some irrelevant on the radar, then rerun scripts/build_golden_jobs.py).")
     only_modes = [m.strip() for m in args.modes.split(",")] if args.modes else None
 
     with httpx.Client() as client:
+        if wanted == ["all"]:
+            wanted = list(installed_models(client, root))
         plan, skipped = build_plan(client, root, wanted, only_modes)
+        if args.publish:
+            return publish(args.publish, load_golden(None))
         if args.report_only:
             write_report(args.report_only, golden if not args.limit else load_golden(None), plan)
             print(f"Report rebuilt: {args.report_only / 'report.md'}")
@@ -329,6 +502,11 @@ def main() -> int:
             return 0
         out_dir = args.resume or args.out_dir or Path("data/golden/bakeoff") / datetime.now().strftime("%Y-%m-%d-T-%H-%M-%S")
         (out_dir / "runs").mkdir(parents=True, exist_ok=True)
+        if not (out_dir / "meta.json").exists():  # a resumed night keeps its original hardware/prompt record
+            meta = run_meta(golden, context_length=args.context_length, note=args.hardware_note)
+            sizes = installed_models(client, root)
+            meta["model_gb"] = {k: round((sizes[k].get("size_bytes") or 0) / 1e9, 1) for k, _ in plan if k in sizes}
+            atomic_write_text(out_dir / "meta.json", json.dumps(meta, indent=1) + "\n")
         profile, resume = reviewer.resolve_resume(load_profile(), Path.cwd())
         rubric = reviewer._SCORING_RUBRIC_PATH.read_text(encoding="utf-8")
         context = build_context(profile, golden)
