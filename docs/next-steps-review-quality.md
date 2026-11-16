@@ -42,16 +42,34 @@ Sample = 14 acted-on + 14 irrelevant + 10 other previously-75+ jobs. Harness: `d
    dates). Keep summary, main roles, education, skills, publications. A `resume_compact` block in
    `config/lm_studio.yaml` lists the headings. Contact details are only ~1% of the tokens; the sections are
    ~25-30%. Then re-run `data/scratch/prompt_check.py` and check the verdicts did not move.
-2. **Measure where the 46 s goes.** Send one job and read `usage.prompt_tokens` vs `completion_tokens`. If it is
-   mostly thinking tokens, turn thinking off for this JSON task (Qwen: `chat_template_kwargs`/`/no_think`, or
-   gpt-oss low reasoning effort) before trimming anything else. The resume sits at the start of every request, so
-   LM Studio's prefix cache may already hide its cost.
-3. **Model bake-off on the same 38 jobs.** Candidates on the server: `qwen/qwen3.6-35b-a3b` (current),
-   `qwen/qwen3.6-27b`, `qwen/qwen3.8-27b`; optionally a downloaded gpt-oss-20b, Gemma 3 27B or a Qwen 4B.
-   Judge by: separation (acted-on vs irrelevant), valid-JSON rate, seconds per job, cap behaviour. Skip the
-   `deepseek-r1` distill and the "uncensored/heretic" variants. Do not fine-tune yet (63 labels, one resume).
-4. **Embedding experiment (ranking, not a gate).** Use LM Studio's `/v1/embeddings` (`text-embedding-nomic-embed-text-v1.5`
-   is loaded; a Qwen3-Embedding-0.6B GGUF is an option). Embed descriptions, score each job by its nearest labelled
+2. **Where the time goes (measured 2026-11-16, `qwen/qwen3.6-35b-a3b`, 3 jobs):** about 7,100-7,500 prompt tokens and
+   **4,750-5,100 completion tokens** per job at 52-64 s. The JSON answer is only a few hundred tokens, so roughly
+   90% of the output is the model thinking. Cutting thinking (a no-think switch, or a smaller/non-reasoning model)
+   is the big speed lever; trimming the resume (about 4,500 of the 7,200 prompt tokens, and probably prefix-cached)
+   is secondary. Check whether `reasoning_content` is separated by LM Studio and whether `/no_think` or a
+   non-thinking model keeps the verdicts.
+3. **Model bake-off on the same 38 jobs.** Harness: `uv run python data/scratch/bakeoff.py MODEL_ID [MODEL_ID ...] [--nothink] [--limit N]`
+   (writes `data/scratch/bakeoff_<model>.json`, resumable, calls only LM Studio; prints valid-JSON rate, median
+   seconds, tokens in/out, AUC acted-vs-irrelevant, irrelevant/acted/other counts at >= 70, and how many irrelevant
+   jobs were judged off-domain). Baseline already known from `prompt_check.json`: `qwen/qwen3.6-35b-a3b`, 38/38 valid,
+   median 46 s, all 14 irrelevant judged off (max 48), 9/14 acted-on at >= 70.
+
+   | Model id (LM Studio) | Why it is in | Notes |
+   |---|---|---|
+   | `qwen/qwen3.6-35b-a3b` | current default (MoE, 3B active) | baseline; ~5K thinking tokens per job |
+   | `qwen/qwen3.6-27b` | dense sibling, installed | likely steadier judgments, slower per token |
+   | `qwen/qwen3.8-27b` | newer dense, installed | try with and without `--nothink` |
+   | Qwen3-4B-2507 | downloading | small and fast; the 2507 builds come as separate Instruct (non-thinking) and Thinking models, so note which one loaded |
+   | Qwen3-4B | downloading | hybrid thinking; compare default vs `--nothink` |
+   | `google/gemma-4-31b-qat` | downloading | non-Qwen family, quantization-aware build; a good check that results are not Qwen-specific |
+
+   Run each model twice where it can think: default, then `--nothink`. Confirm each id with
+   `curl -s $base_url/models` first (the downloads were not served yet on 2026-11-16 morning). Skip the `deepseek-r1`
+   distill and the "uncensored/heretic" Qwen variants. Decision rule: keep the model that separates acted-on from
+   irrelevant jobs as well as the baseline (AUC, irrelevant judged off) at a clearly lower seconds-per-job; a 4B that
+   only matches on separation but misses `adjacent`/`off` calls is not enough.
+4. **Embedding experiment (ranking, not a gate).** Use LM Studio's `/v1/embeddings` (`text-embedding-qwen3-embedding-0.6b` and
+   `text-embedding-nomic-embed-text-v1.5` are both served now; `qwen3-reranker-0.6b` is also present). Embed descriptions, score each job by its nearest labelled
    neighbours (acted-on positive, tagged-irrelevant negative), and compare the separation with the LLM's. If good:
    order the review queue by it (best first, every candidate still reviewed) and show a "looks like jobs you acted on"
    tag. A cross-encoder reranker (Qwen3-Reranker-0.6B) needs `transformers`/`torch`; defer until the embedding test
