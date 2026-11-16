@@ -48,26 +48,32 @@ Sample = 14 acted-on + 14 irrelevant + 10 other previously-75+ jobs. Harness: `d
    is the big speed lever; trimming the resume (about 4,500 of the 7,200 prompt tokens, and probably prefix-cached)
    is secondary. Check whether `reasoning_content` is separated by LM Studio and whether `/no_think` or a
    non-thinking model keeps the verdicts.
-3. **Model bake-off on the same 38 jobs.** Harness: `uv run python data/scratch/bakeoff.py MODEL_ID [MODEL_ID ...] [--nothink] [--limit N]`
-   (writes `data/scratch/bakeoff_<model>.json`, resumable, calls only LM Studio; prints valid-JSON rate, median
-   seconds, tokens in/out, AUC acted-vs-irrelevant, irrelevant/acted/other counts at >= 70, and how many irrelevant
-   jobs were judged off-domain). Baseline already known from `prompt_check.json`: `qwen/qwen3.6-35b-a3b`, 38/38 valid,
-   median 46 s, all 14 irrelevant judged off (max 48), 9/14 acted-on at >= 70.
-
-   | Model id (LM Studio) | Why it is in | Notes |
-   |---|---|---|
-   | `qwen/qwen3.6-35b-a3b` | current default (MoE, 3B active) | baseline; ~5K thinking tokens per job |
-   | `qwen/qwen3.6-27b` | dense sibling, installed | likely steadier judgments, slower per token |
-   | `qwen/qwen3.8-27b` | newer dense, installed | try with and without `--nothink` |
-   | Qwen3-4B-2507 | downloading | small and fast; the 2507 builds come as separate Instruct (non-thinking) and Thinking models, so note which one loaded |
-   | Qwen3-4B | downloading | hybrid thinking; compare default vs `--nothink` |
-   | `google/gemma-4-31b-qat` | downloading | non-Qwen family, quantization-aware build; a good check that results are not Qwen-specific |
-
-   Run each model twice where it can think: default, then `--nothink`. Confirm each id with
-   `curl -s $base_url/models` first (the downloads were not served yet on 2026-11-16 morning). Skip the `deepseek-r1`
-   distill and the "uncensored/heretic" Qwen variants. Decision rule: keep the model that separates acted-on from
-   irrelevant jobs as well as the baseline (AUC, irrelevant judged off) at a clearly lower seconds-per-job; a 4B that
-   only matches on separation but misses `adjacent`/`off` calls is not enough.
+3. **Model bake-off (built; first overnight run started 2026-11-16 00:25).**
+   - **Golden set** (`scripts/build_golden_jobs.py` -> `data/golden/golden_jobs.json`, git-ignored, back it up): 97 jobs
+     snapshotted with their posting text = 34 positives (offer declined, interviewing, interviewed-rejected, applied,
+     employer-rejected, saved), 60 negatives (tagged irrelevant) and 3 neutral (`okay`). Outcomes you told me that no
+     table holds live in `data/golden/outcome_overrides.json`. The builder only adds, so the set cannot shrink; rerun it
+     after you apply/label more jobs.
+   - **Runner** (`scripts/bakeoff_models.py`): for each model on disk it `lms load`s it, runs the golden jobs through the
+     real review prompt once per reasoning mode (`off` = `reasoning_effort: "none"`, `low` where the model lists it,
+     `default` = the model's own setting), refreshes `report.md`/`summary.csv`/`matrix.csv` after EVERY run, then unloads
+     it. Stage order (so a partial night is still useful): non-thinking models and all `off` runs first, then `low`, then
+     every `default` run, smallest model first. `--run-budget-minutes` (90) caps one run, `--deadline-hours` (10) the
+     night. Resumable with `--resume <dir>`; `--plan` shows the plan; `--report-only <dir>` rebuilds a report.
+     It holds the shared `job-hunter` run lock (a pipeline run cannot overlap it) and unloads other models first.
+     Output: `data/golden/bakeoff/<run-id>/` (`run.log` is the live progress).
+   - **Models:** `qwen/qwen3.6-35b-a3b` (current), `qwen/qwen3.6-27b`, `qwen/qwen3.8-27b` (its default reasoning is `xhigh`, so
+     expect `default` to hit the budget), `qwen/qwen3-4b-2507` (no thinking switch, one run), `qwen/qwen3-4b` (off/default),
+     `google/gemma-4-31b-qat` (skipped until it is on disk: `lms ls` did not list it on 2026-11-16; rerun
+     `--models google/gemma-4-31b-qat` later, or all of them with `--resume`).
+   - **Reasoning switch facts (measured):** `reasoning_effort: "none"` turns thinking off on LM Studio (5 s and ~440 output
+     tokens vs 54 s and ~4,950). `/no_think` in the prompt and `chat_template_kwargs.enable_thinking=false` do nothing.
+     LM Studio rejects `low` on models that only list `on`/`off` (it silently falls back to `on`), so `low` is only run
+     where the model lists it. No-thinking output slips on format more often (about 4 of 20 first tries), hence the one retry.
+   - **How to read the report:** AUC (1.0 = every wanted job outscores every irrelevant one), `neg_ge70` (irrelevant jobs
+     still reaching "Likely fit"), `pos_ge70/75/80` (wanted jobs that stay visible), `pos_off` (wanted jobs wrongly called
+     off-domain), median seconds and output tokens, then `matrix.csv` with every golden job against every run.
+     Decision rule: the fastest run whose AUC and `pos_ge70` match the best thinking run and whose `neg_ge70` stays near 0.
 4. **Embedding experiment (ranking, not a gate).** Use LM Studio's `/v1/embeddings` (`text-embedding-qwen3-embedding-0.6b` and
    `text-embedding-nomic-embed-text-v1.5` are both served now; `qwen3-reranker-0.6b` is also present). Embed descriptions, score each job by its nearest labelled
    neighbours (acted-on positive, tagged-irrelevant negative), and compare the separation with the LLM's. If good:
