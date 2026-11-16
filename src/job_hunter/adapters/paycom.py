@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 
+from ..extras import compact_extras
 from ..models import JobDetail, JobSummary
 from ..normalizer import parse_flexible_date, stringify
 from .base import JobAdapter, SchemaError
@@ -121,4 +122,18 @@ class PaycomAdapter(JobAdapter):
                 posted_at = parse_flexible_date(json.loads(google_job_json).get("datePosted"))
             except (json.JSONDecodeError, AttributeError):
                 posted_at = None
-        return JobDetail(description="\n\n".join(parts) or None, posted_at=posted_at)
+        # googleJobJson is a JSON *string* of the posting's schema.org record; parse it so its
+        # fields (employmentType, jobLocation, validThrough, ...) are kept, not dropped as a long string.
+        record = {k: v for k, v in posting.items() if k != "googleJobJson"}
+        if google_job_json:
+            try:
+                parsed = json.loads(google_job_json)
+                if isinstance(parsed, dict):
+                    record["googleJobJson"] = {k: v for k, v in parsed.items() if k != "description"}
+            except json.JSONDecodeError:
+                pass
+        return JobDetail(
+            description="\n\n".join(parts) or None,
+            posted_at=posted_at,
+            extras=compact_extras(record, skip_keys=("description", "qualifications")) or None,
+        )

@@ -107,7 +107,13 @@ class AdpRecruitingAdapter(JobAdapter):
             state=state,
             country=country,
             posted_at=parse_flexible_date(item.get("postingDate")),
-            raw={"description": description},
+            # Keep the whole listing item (minus the two description fields already folded into
+            # `description`) so jobs.extras records clientRequisitionID, organizationalUnits, etc.
+            # (all empty today, but a tenant change would otherwise vanish silently).
+            raw={
+                **{k: v for k, v in item.items() if k not in ("jobDescription", "jobQualifications")},
+                "description": description,
+            },
         )
 
     async def fetch_detail(self, summary: JobSummary) -> JobDetail:

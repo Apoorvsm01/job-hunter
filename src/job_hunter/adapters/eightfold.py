@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ..extras import compact_extras
 from ..models import JobDetail, JobSummary
 from ..normalizer import parse_flexible_date, stringify
 from .base import SchemaError
@@ -110,4 +111,5 @@ class EightfoldAdapter(ConfigurableJsonAdapter):
         return JobDetail(
             description=stringify(data.get("jobDescription") or data.get("job_description")),
             location_raw=stringify(data.get("standardizedLocations") or data.get("locations")),
+            extras=compact_extras(data, skip_keys=("jobDescription", "job_description")) or None,
         )

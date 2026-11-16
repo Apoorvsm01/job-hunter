@@ -1592,6 +1592,8 @@ async def test_adp_recruiting_token_handshake_and_pagination():
     assert jobs[0].posted_at is not None
     assert "Build cars." in detail.description
     assert "5 years experience." in detail.description
+    # the listing item's other fields are kept for jobs.extras; the long description fields are not duplicated
+    assert jobs[0].raw["reqId"] == "1" and "jobDescription" not in jobs[0].raw and jobs[0].raw["description"]
 
 
 @pytest.mark.asyncio
