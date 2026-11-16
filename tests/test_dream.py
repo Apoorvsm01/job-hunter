@@ -87,13 +87,29 @@ def test_title_exclusions_cancel_title_rules_only():
 def test_level_rule_uses_the_highest_stated_level_for_that_source_only():
     from job_hunter.config import LevelRule
 
-    cfg = DreamConfig(levels={"ford": LevelRule(pattern=r"fordcareers\.co/LL(\d+)", min=6, label="LL")})
+    cfg = DreamConfig(levels={"ford": LevelRule(pattern=r"fordcareers\.co/LL(\d+)", min=4, label="LL")})  # a single rule is accepted
+    assert cfg.levels["ford"][0].min == 4
     ll = lambda *n: " ".join(f"click https://fordcareers.co/LL{x}" for x in n)  # noqa: E731
     assert evaluate_dream(job(source_key="ford", description=ll(6)), cfg).reasons == ("level: LL6",)
-    assert evaluate_dream(job(source_key="ford", description=ll(5, 7)), cfg).reasons == ("level: LL7",)  # top of range
-    assert not evaluate_dream(job(source_key="ford", description=ll(5)), cfg).is_dream
+    assert evaluate_dream(job(source_key="ford", description=ll(4)), cfg).reasons == ("level: LL4",)
+    assert evaluate_dream(job(source_key="ford", description=ll(2, 5)), cfg).reasons == ("level: LL5",)  # top of range
+    assert not evaluate_dream(job(source_key="ford", description=ll(3)), cfg).is_dream
     assert not evaluate_dream(job(source_key="ford", description="no level stated"), cfg).is_dream
     assert not evaluate_dream(job(source_key="other", description=ll(9)), cfg).is_dream
+
+
+def test_a_source_can_have_several_level_schemes_and_a_level_can_require_a_salary_floor():
+    cfg = DreamConfig(levels={"ford": [
+        {"pattern": r"fordcareers\.co/LL(\d+)", "min": 4, "label": "LL"},
+        {"pattern": r"salary grade\s*(\d+)", "min": 8, "label": "GSR", "min_salary_usd": 160000},
+    ]})
+    grade8 = "This position is a salary grade 8 and ranges from $135,420-226,980."
+    assert evaluate_dream(job(source_key="ford", description=grade8, salary_max=226980), cfg).reasons == ("level: GSR8",)
+    assert not evaluate_dream(job(source_key="ford", description=grade8, salary_max=150000), cfg).is_dream
+    assert not evaluate_dream(job(source_key="ford", description=grade8), cfg).is_dream  # no salary stated
+    assert not evaluate_dream(job(source_key="ford", description="salary grade 7", salary_max=300000), cfg).is_dream
+    both = f"{grade8} https://fordcareers.co/LL6"
+    assert evaluate_dream(job(source_key="ford", description=both, salary_max=226980), cfg).reasons == ("level: LL6", "level: GSR8")
 
 
 def test_level_rule_pattern_needs_exactly_one_capture_group():

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import re
+from datetime import datetime
 
 from ..extras import compact_extras
 from ..location import detect_arrangement
@@ -10,6 +12,19 @@ from .base import SchemaError
 from .json_api import ConfigurableJsonAdapter
 
 logger = logging.getLogger(__name__)
+
+
+def _end_date(value: object) -> datetime | None:
+    """Workday's `endDate` ("2026-12-20", Valeo's "End Date: December 20, 2026") is a calendar date,
+    not an instant. Midnight UTC would display as the previous evening in US timezones, so a
+    date-only value is stored as the end of that day (23:59:59 UTC)."""
+    text = stringify(value)
+    if not text:
+        return None
+    parsed = parse_flexible_date(text)
+    if parsed is not None and re.fullmatch(r"\d{4}-\d{2}-\d{2}", text.strip()):
+        parsed = parsed.replace(hour=23, minute=59, second=59)
+    return parsed
 
 
 class WorkdayAdapter(ConfigurableJsonAdapter):
@@ -135,5 +150,6 @@ class WorkdayAdapter(ConfigurableJsonAdapter):
             # startDate is an absolute date, more precise than the summary's relative postedOn text.
             posted_at=parse_flexible_date(info.get("startDate")) or parse_relative_posted(stringify(info.get("postedOn"))),
             work_arrangement=detect_arrangement(remote_type) if remote_type else None,
+            application_deadline=_end_date(info.get("endDate")),
             extras=compact_extras(info, skip_keys=("jobDescription",)) or None,
         )

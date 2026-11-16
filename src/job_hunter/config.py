@@ -107,6 +107,9 @@ class LevelRule(BaseModel):
     pattern: str
     min: int = Field(ge=1)
     label: str = "L"
+    # Optional extra condition: the level only counts when the job also states a USD salary whose top
+    # is >= this (e.g. Ford's GSR 8 -- a mid grade -- only when the range reaches your floor).
+    min_salary_usd: float | None = Field(default=None, gt=0)
 
     @field_validator("pattern")
     @classmethod
@@ -131,7 +134,15 @@ class DreamConfig(BaseModel):
     # term doesn't tag every Project/Product Manager). Company and salary rules are unaffected.
     title_exclusions: list[str] = Field(default_factory=list)
     # {source_key: LevelRule}, e.g. Ford's LL6+; the top of a stated range counts (LL5-LL6 -> LL6).
-    levels: dict[str, LevelRule] = Field(default_factory=dict)
+    # A source may have several schemes (Ford: LL and GSR), so each value is a list of rules.
+    levels: dict[str, list[LevelRule]] = Field(default_factory=dict)
+
+    @field_validator("levels", mode="before")
+    @classmethod
+    def _levels_accept_a_single_rule(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {k: (v if isinstance(v, list) else [v]) for k, v in value.items()}
+        return value
     min_salary_usd: float | None = Field(default=None, gt=0)
 
     @property

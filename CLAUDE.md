@@ -315,9 +315,15 @@ ranked `SearchResult` JSON.
   `expect_detail_fields: {department: 0.5}` makes `health.detect_field_coverage` raise a `warning` when freshly fetched
   details stop carrying a field (min sample 10), so an upstream rename can't silently blank a mapped field. A detail-only
   field is kept from the stored row on runs that skip the detail fetch (`collector.py` falls back to `prior[...]`).
-- **Dream levels** (`radar.dream.levels`, `LevelRule`) — per-source minimum job level for the Dream tag, read from the
-  posting text by a one-capture-group regex (Ford: `fordcareers\.co/LL(\d+)`, min 6; only ~20% of Ford postings state a
-  level, and Woven's states none, so it has no rule). Ford's listing `ManagerLevel`/`JobFamily` are null for every job.
+- **Dream levels** (`radar.dream.levels`, `{source_key: [LevelRule]}`) — per-source minimum job level for the Dream tag, read
+  from posting text by a one-capture-group regex; a source can have several schemes, and a rule may carry
+  `min_salary_usd` (level counts only when the job's top USD salary reaches it). Ford: LL4+ (`fordcareers.co/LL(\d+)`,
+  ~20% of postings) and GSR 8+ with pay >= $160K (`salary grade (\d+)`, ~60% of postings). The top of a stated range counts.
+  Ford's listing `ManagerLevel`/`JobFamily` are null for every job. Checked and *not* rule-able: Valeo, PACCAR (no stated
+  level in text or payload), Woven (none). Candidates when thresholds are chosen: Honda `Career Level: N` (36 of 430 jobs,
+  corporate roles) and GM `This Level N role` (~13 of 855). Workday-native adapters (GM, Valeo) also read `endDate` as the
+  application deadline (date-only -> end of that day UTC), and Phenom (Honda)/`html_paginated` (PACCAR) keep their
+  JSON-LD in `extras`.
 
 - **`scripts/refilter_archive.py`** — answers "what would this already-collected archive's
   candidates look like under the *current* profile," no network. Rebuilds `candidates` from

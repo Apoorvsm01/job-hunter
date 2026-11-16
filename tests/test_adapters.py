@@ -641,6 +641,8 @@ async def test_phenom_detail_appends_embedded_pay_range():
         detail = await adapter.fetch_detail(summary)
     assert "Validate ADAS features" in detail.description
     assert "$84,500.00 - $105,600.00" in detail.description
+    # the page's other JSON-LD fields ride along in extras; the description is already stored
+    assert detail.extras and "description" not in detail.extras
     result = evaluate_salary(detail.description)
     assert (result.min_value, result.max_value) == (84500.0, 105600.0)
 
@@ -1373,6 +1375,8 @@ async def test_html_detail_json_ld_fallback():
         jobs = await adapter.fetch_summaries()
         detail = await adapter.fetch_detail(jobs[0])
     assert detail.description == "Real description"
+    assert detail.extras == {"@context": "https://schema.org", "@type": "JobPosting",
+                             "datePosted": "2026-05-29", "employmentType": "FULL_TIME"}
     assert detail.posted_at == parse_flexible_date("2026-05-29")
     assert detail.employment_type == "FULL_TIME"
 
@@ -2690,3 +2694,31 @@ async def test_html_placeholder_without_the_setting_is_still_a_schema_error():
     async with httpx.AsyncClient() as client:
         with pytest.raises(SchemaError):
             await HtmlPaginatedAdapter(company, client, CollectionConfig(max_retries=0)).fetch_summaries()
+
+
+@pytest.mark.asyncio
+@respx.mock
+@pytest.mark.parametrize(
+    ("end_date", "expected"),
+    [("2026-12-20", "2026-12-20T23:59:59+00:00"), ("2026-12-20T15:30:00+00:00", "2026-12-20T15:30:00+00:00"), (None, None)],
+)
+async def test_workday_native_detail_reads_end_date_as_application_deadline(end_date, expected):
+    """Valeo's Workday detail carries `endDate` ("End Date: December 20, 2026"). A date-only value is
+    stored as the end of that day so it never displays as the evening before in US timezones."""
+    list_url = "https://tenant.wd1.myworkdayjobs.com/wday/cxs/tenant/site/jobs"
+    respx.post(list_url).mock(return_value=httpx.Response(200, json={"total": 1, "jobPostings": [
+        {"title": "R", "externalPath": "/job/C/R_JR-1", "jobId": "JR-1", "postedOn": "Posted Today"}]}))
+    info = {"jobDescription": "d", "title": "R"}
+    if end_date:
+        info["endDate"] = end_date
+    respx.get("https://tenant.wd1.myworkdayjobs.com/wday/cxs/tenant/site/job/C/R_JR-1").mock(
+        return_value=httpx.Response(200, json={"jobPostingInfo": info}))
+    company = CompanyConfig(key="tenant", company="Tenant", adapter="workday", config={
+        "workday_native": True, "list_url": list_url,
+        "public_base_url": "https://tenant.wd1.myworkdayjobs.com/en-US/site/"})
+    async with httpx.AsyncClient() as client:
+        adapter = WorkdayAdapter(company, client, CollectionConfig(max_retries=0))
+        detail = await adapter.fetch_detail((await adapter.fetch_summaries())[0])
+    got = detail.application_deadline.isoformat() if detail.application_deadline else None
+    assert got == expected
+    assert "jobDescription" not in (detail.extras or {})

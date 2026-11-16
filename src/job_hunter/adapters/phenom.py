@@ -5,6 +5,7 @@ import json
 import re
 from urllib.parse import urljoin
 
+from ..extras import compact_extras
 from ..models import JobDetail, JobSummary
 from ..normalizer import extract_job_posting_ld, normalize_text, parse_flexible_date, stringify
 from .base import JobAdapter, SchemaError
@@ -142,4 +143,5 @@ class PhenomAdapter(JobAdapter):
             description=description,
             posted_at=parse_flexible_date(posting.get("datePosted")),
             employment_type=stringify(posting.get("employmentType")),
+            extras=compact_extras(posting, skip_keys=("description",)) or None,
         )

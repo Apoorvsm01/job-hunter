@@ -99,16 +99,19 @@ def evaluate_dream(job: Mapping[str, Any], config: DreamConfig | None) -> DreamD
 
     reasons.extend(f"title: {t}" for t in _hits(config.title_terms))
 
-    rule = config.levels.get(str(job.get("source_key") or ""))
-    if rule is not None:
-        found = [int(n) for n in re.findall(rule.pattern, job.get("description") or "", re.IGNORECASE)]
-        if found and max(found) >= rule.min:
-            reasons.append(f"level: {rule.label}{max(found)}")
+    is_usd = (job.get("salary_currency") or "USD").upper() == "USD"
+    top = (job.get("salary_max") or job.get("salary_min")) if is_usd else None
 
-    if config.min_salary_usd is not None and (job.get("salary_currency") or "USD").upper() == "USD":
-        top = job.get("salary_max") or job.get("salary_min")
-        if top is not None and top >= config.min_salary_usd:
-            reasons.append(f"salary: ${top:,.0f}")
+    for rule in config.levels.get(str(job.get("source_key") or ""), []):
+        found = [int(n) for n in re.findall(rule.pattern, job.get("description") or "", re.IGNORECASE)]
+        if not found or max(found) < rule.min:
+            continue
+        if rule.min_salary_usd is not None and (top is None or top < rule.min_salary_usd):
+            continue
+        reasons.append(f"level: {rule.label}{max(found)}")
+
+    if config.min_salary_usd is not None and top is not None and top >= config.min_salary_usd:
+        reasons.append(f"salary: ${top:,.0f}")
 
     if reasons:
         return DreamDecision("dream", tuple(reasons))

@@ -68,7 +68,9 @@ radar:
     # Per-source job level, for sources whose postings state one. pattern has ONE capture group (the
     # level number); the highest level found must be >= min. Example (Ford: /LL6 in a salary link):
     levels: {}
-    #   ford: {pattern: 'fordcareers\.co/LL(\d+)', min: 6, label: LL}
+    #   ford:                       # a list: one source can have several schemes
+    #     - {pattern: 'fordcareers\.co/LL(\d+)', min: 4, label: LL}
+    #     - {pattern: 'salary grade\s*(\d+)', min: 8, label: GSR, min_salary_usd: 160000}  # only with pay >= floor
     # The whole published range counts: a job qualifies when the TOP of its USD range is >= this
     # (e.g. $128K-$209K qualifies at 160000). Jobs with no published salary just skip this rule.
     min_salary_usd: 160000
