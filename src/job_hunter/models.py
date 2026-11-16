@@ -133,6 +133,8 @@ class Job(JobSummary):
     salary_max: float | None = None
     salary_currency: str | None = None
     salary_evidence: str | None = None
+    # Every range of a multi-range posting ({label, low, high, text}); salary_min/max span them all.
+    salary_tiers: list[dict[str, Any]] | None = None
     application_deadline: datetime | None = None
     # `{"listing": {...}, "detail": {...}}`; persisted in jobs.extras, never dumped into archives.
     extras: dict[str, Any] | None = Field(default=None, exclude=True)

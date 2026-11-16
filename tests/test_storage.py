@@ -828,3 +828,16 @@ def test_readonly_active_pool_reads_a_database_that_predates_new_columns(tmp_pat
         storage.connection.commit()
     [job] = raw_active_jobs(path, readonly=True)
     assert job.application_deadline is None and job.job_id == "42"
+
+
+def test_salary_tiers_roundtrip_and_reevaluate_salary_backfills_min_max_and_tiers(tmp_path):
+    text = "Pay: 184,000 USD - 287,500 USD for Level 4, and 224,000 USD - 356,500 USD for Level 5."
+    with Storage(tmp_path / "jobs.sqlite3") as storage:
+        # stored the old way: only the first range, no tiers
+        storage.upsert_job(make_job(description=text, salary_min=184000, salary_max=287500,
+                                    salary_evidence="184,000 USD - 287,500 USD"))
+        assert storage.reevaluate_salary() == 1
+        row = storage.get_job("acme", "42")
+        assert (row["salary_min"], row["salary_max"], row["salary_evidence"]) == (184000.0, 356500.0, "$184,000 - $356,500")
+        assert [t["label"] for t in json.loads(row["salary_tiers"])] == ["Level 4", "Level 5"]
+        assert storage.reevaluate_salary() == 0  # idempotent

@@ -61,7 +61,7 @@ _JOB_COLUMNS = (
     "us_eligible", "location_confidence", "location_evidence",
     "visa_sponsorship", "sponsorship_evidence", "department",
     "employment_type", "posted_at", "description", "salary_min",
-    "salary_max", "salary_currency", "salary_evidence", "application_deadline", "content_hash",
+    "salary_max", "salary_currency", "salary_evidence", "salary_tiers", "application_deadline", "content_hash",
     "first_seen_at", "last_seen_at",
 )
 
@@ -72,6 +72,8 @@ def _row_to_job(row: sqlite3.Row) -> Job:
     available = set(row.keys())
     data = {column: (row[column] if column in available else None) for column in _JOB_COLUMNS}
     data["url"] = row["canonical_url"]
+    if isinstance(data.get("salary_tiers"), str):
+        data["salary_tiers"] = json.loads(data["salary_tiers"])
     return Job(**data)
 
 

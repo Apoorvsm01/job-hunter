@@ -424,6 +424,7 @@ class Collector:
                             else ("USD" if salary.evidence else None)
                         ),
                         salary_evidence=salary.evidence,
+                        salary_tiers=[t.as_dict() for t in salary.tiers] or None,
                         # Only a fresh detail fetch can state a deadline; otherwise keep what is
                         # already stored rather than blanking it on a no-detail run.
                         application_deadline=(

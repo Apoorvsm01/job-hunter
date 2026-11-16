@@ -319,7 +319,21 @@ def _filter_data_attrs(
     )
 
 
-def _job_meta_html(location: str | None, salary_evidence: str | None) -> str:
+def _tier_lines(tiers: list[dict[str, Any]] | None) -> list[str]:
+    return [str(t.get("text") or "").strip() for t in (tiers or []) if t.get("text")]
+
+
+def _pay_tiers_note(tiers: list[dict[str, Any]] | None) -> str:
+    """The expanded dropdown's "Pay ranges" list for a multi-range posting (one line per Level/
+    region range, in the posting's own wording). Empty for a single-range or no-pay posting."""
+    lines = _tier_lines(tiers)
+    if len(lines) < 2:
+        return ""
+    items = "".join(f"<br>&bull; {_e(line)}" for line in lines)
+    return f'<p class="sponsor-note pay-tiers">Pay ranges (summary shows lowest to highest):{items}</p>'
+
+
+def _job_meta_html(location: str | None, salary_evidence: str | None, salary_tiers: list[dict[str, Any]] | None = None) -> str:
     """Location and salary, shown directly in the always-visible summary row rather
     than only inside the click-to-expand detail — a report reader shouldn't have to
     open every single row just to see where a job is or what it pays. `·`-joined onto
@@ -334,7 +348,9 @@ def _job_meta_html(location: str | None, salary_evidence: str | None) -> str:
     if location:
         parts.append(f'<span class="job-location">{_e(location)}</span>')
     if salary_evidence:
-        parts.append(f'<span class="job-salary">{_e(salary_evidence)}</span>')
+        lines = _tier_lines(salary_tiers)
+        hint = f' title="{_attr(" | ".join(lines))}"' if len(lines) > 1 else ""
+        parts.append(f'<span class="job-salary"{hint}>{_e(salary_evidence)}</span>')
     return " · ".join(parts)
 
 
@@ -460,7 +476,8 @@ def _row_html(
         if row.get("sponsorship_evidence")
         else ""
     )
-    meta_html = _job_meta_html(row.get("location"), row.get("salary_evidence"))
+    meta_html = _job_meta_html(row.get("location"), row.get("salary_evidence"), row.get("salary_tiers"))
+    pay_note = _pay_tiers_note(row.get("salary_tiers"))
     job_meta = f'<span class="job-meta">{meta_html}</span>' if meta_html else ""
     # Always emit .tags as its own grid child, even empty — summary's grid tracks are
     # positional (auto-placement fills them in DOM order), so omitting this element
@@ -518,7 +535,7 @@ def _row_html(
           <h3>Gaps</h3>
           <ul>{gaps_html}</ul>
         </div>
-        {f'<div class="detail-meta">{sponsorship_note}</div>' if sponsorship_note else ""}{app_panel}
+        {f'<div class="detail-meta">{pay_note}{sponsorship_note}</div>' if (sponsorship_note or pay_note) else ""}{app_panel}
       </div>
     </details>'''
 
@@ -563,7 +580,9 @@ def _never_reviewed_row_html(
         deadline=candidate.get("deadline"),
     )
     date_display = _fmt_date(posted_at) or _fmt_first_seen(first_seen_at) or "Date unknown"
-    meta_html = _job_meta_html(candidate.get("location_raw"), candidate.get("salary_evidence"))
+    meta_html = _job_meta_html(
+        candidate.get("location_raw"), candidate.get("salary_evidence"), candidate.get("salary_tiers")
+    )
     job_meta = f'<span class="job-meta">{meta_html}</span>' if meta_html else ""
     label = _live_label(feedback, candidate["source_key"], candidate["job_id"]) if live else None
     app = apps.get(f"{candidate['source_key']}|{candidate['job_id']}") if (live and apps) else None
@@ -1024,6 +1043,7 @@ def render(
                 "visa_sponsorship": candidate.get("visa_sponsorship"),
                 "sponsorship_evidence": candidate.get("sponsorship_evidence"),
                 "salary_evidence": candidate.get("salary_evidence"),
+                "salary_tiers": candidate.get("salary_tiers"),
                 "work_arrangement": candidate.get("work_arrangement"),
                 "state": candidate.get("state"),
                 "country": candidate.get("country"),

@@ -103,14 +103,20 @@ def test_typo_range_keeps_evidence_but_not_untrustworthy_numbers():
 
 
 def test_currency_code_ranges_without_a_dollar_sign():
-    """NVIDIA (1,100+ postings) writes '184,000 USD - 287,500 USD' with no '$'. The first
-    range is the one reported when several levels are listed."""
+    """NVIDIA (1,100+ postings) writes '184,000 USD - 287,500 USD' with no '$'. When several
+    levels are listed, min/max span all of them and each level is kept as a tier."""
     text = (
         "The base salary range is 184,000 USD - 287,500 USD for Level 4, and "
         "224,000 USD - 356,500 USD for Level 5."
     )
     decision = evaluate_salary(text)
-    assert (decision.min_value, decision.max_value) == (184000.0, 287500.0)
+    assert (decision.min_value, decision.max_value) == (184000.0, 356500.0)
+    assert decision.evidence == "$184,000 - $356,500"
+    assert [(t.label, t.low, t.high, t.text) for t in decision.tiers] == [
+        ("Level 4", 184000.0, 287500.0, "184,000 USD - 287,500 USD for Level 4"),
+        ("Level 5", 224000.0, 356500.0, "224,000 USD - 356,500 USD for Level 5"),
+    ]
+    assert evaluate_salary("USD 120,000 - 150,000").tiers == ()  # a single range has no tiers
     assert evaluate_salary("USD 120,000 - 150,000").min_value == 120000.0
     # a bare number range, or a USD that isn't attached to the first number, is not pay
     for text in ("100,000 - 200,000 users", "we serve 5,000 USD customers - 10"):
@@ -121,3 +127,19 @@ def test_a_sentence_comma_after_the_range_is_not_part_of_the_number():
     decision = evaluate_salary("pay is $184,200–$240,000, plus a bonus")
     assert decision.evidence == "$184,200–$240,000"
     assert decision.max_value == 240000.0
+
+
+def test_multi_range_posts_span_every_range_in_one_passage_but_not_unrelated_ones():
+    regions = "$130,300 - $187,600 USD (Region 2); $153,300 - $220,700 USD (Region 1)."
+    d = evaluate_salary(f"Pay: {regions}")
+    assert (d.min_value, d.max_value, len(d.tiers)) == (130300.0, 220700.0, 2)
+    assert d.evidence == "$130,300 - $220,700"
+    # hourly and annual figures are different kinds: the second never joins the first
+    mixed = evaluate_salary("Pay $25 - $30 per hour. Or $90,000 - $120,000 per year.")
+    assert (mixed.min_value, mixed.max_value, mixed.tiers) == (25.0, 30.0, ())
+    # a second range far away (a different passage) is not merged
+    far = evaluate_salary("Salary $100,000 - $120,000. " + "x " * 400 + "Bonus $10,000 - $50,000.")
+    assert (far.min_value, far.max_value, far.tiers) == (100000.0, 120000.0, ())
+    # a typo'd later range never overrides a good first one
+    typo = evaluate_salary("$100,000 - $120,000 or $130,000- $145,00")
+    assert (typo.min_value, typo.max_value) == (100000.0, 120000.0)

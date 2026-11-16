@@ -1738,3 +1738,20 @@ def test_deadline_uses_the_viewers_timezone_and_the_soon_window_is_configurable(
 def test_no_deadlines_means_no_deadline_assets(tmp_path):
     html, _ = render(**_deadline_inputs(tmp_path, {"1": None}))
     assert "deadline" not in html.lower()
+
+
+def test_multi_range_pay_shows_lowest_to_highest_with_each_tier_in_the_dropdown(tmp_path):
+    inputs = _deadline_inputs(tmp_path, {"1": None, "2": None})
+    data = json.loads(inputs["search_path"].read_text())
+    data["candidates"][0]["salary_evidence"] = "$184,000 - $356,500"
+    data["candidates"][0]["salary_tiers"] = [
+        {"label": "Level 4", "low": 184000, "high": 287500, "text": "184,000 USD - 287,500 USD for Level 4"},
+        {"label": "Level 5", "low": 224000, "high": 356500, "text": "224,000 USD - 356,500 USD for Level 5"},
+    ]
+    data["candidates"][1]["salary_evidence"] = "$100,000 - $120,000"  # single range: no tiers, no dropdown note
+    inputs["search_path"].write_text(json.dumps(data))
+    html, _ = render(**inputs)
+    assert '<span class="job-salary" title="184,000 USD - 287,500 USD for Level 4 | 224,000 USD - 356,500 USD for Level 5">$184,000 - $356,500</span>' in html
+    assert html.count("Pay ranges (summary shows lowest to highest):") == 1
+    assert "&bull; 184,000 USD - 287,500 USD for Level 4" in html and "&bull; 224,000 USD - 356,500 USD for Level 5" in html
+    assert html.count('<span class="job-salary">') == 1  # the single-range job stays plain
