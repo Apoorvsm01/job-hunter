@@ -151,8 +151,12 @@ before writing config for it — never hand-invent an endpoint shape (§5.23).
 Each adapter maps a few fields of its source's response onto the typed `Job` fields; everything
 else is kept in `jobs.extras` (`extras.py`: `{"listing": ..., "detail": ...}`, empties and
 description text dropped, strings > 2000 chars dropped with the key named in `_omitted_long`, ~20KB
-cap) so a later mapping is a local read, not a re-fetch. Mappings that are *not* a plain listing
-field, and where the data comes from:
+cap) so a later mapping is a local read, not a re-fetch. One key is read back by code:
+`extras["detail"]["pay_text"]` is pay wording a site keeps outside its description (Apple's `postingFooters`
+"Pay & Benefits" entry); `extras.salary_source_text()` appends it to the description for `evaluate_salary`, in
+both the collector and `reevaluate_salary()`. It lives in extras so `content_hash` (hence review caching) is
+untouched; stored jobs gain it only on a detail refetch (`search --companies apple --refresh-details`, then
+`reevaluate-salary`). Mappings that are *not* a plain listing field, and where the data comes from:
 
 | Source | Typed field | Source field | Where | Notes |
 |---|---|---|---|---|

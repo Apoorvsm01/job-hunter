@@ -7,6 +7,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from .extras import salary_source_text
 from .location import code_appears_in_own_text, evaluate_location, is_ambiguous_state_country_code
 from .models import (
     Application,
@@ -378,11 +379,11 @@ class Storage:
         before salary_evidence existed, or picks up a salary.py pattern improvement,
         with no network involved."""
         rows = self.connection.execute(
-            "SELECT source_key, job_id, description, salary_evidence, salary_min, salary_max, salary_tiers FROM jobs"
+            "SELECT source_key, job_id, description, extras, salary_evidence, salary_min, salary_max, salary_tiers FROM jobs"
         ).fetchall()
         changed = 0
         for row in rows:
-            decision = evaluate_salary(row["description"])
+            decision = evaluate_salary(salary_source_text(row["description"], row["extras"]))
             tiers = (
                 json.dumps([t.as_dict() for t in decision.tiers], ensure_ascii=False) if decision.tiers else None
             )
@@ -966,15 +967,26 @@ class Storage:
         this job was confirmed present," the right anchor for "days since closed" with no
         schema migration needed. Used for both a dry-run preview and, immediately before
         `delete_closed_jobs`, to know exactly what's about to be removed (for the pre-delete
-        export — see docs/retention-cleanup-plan.md section 3.8/4)."""
+        export — see docs/retention-cleanup-plan.md section 3.8/4).
+
+        A job you acted on is never eligible: one with an `applications` row (saved, applied,
+        interviewing, offer, rejected...) or a `job_feedback` label keeps its posting text, since
+        that is the evidence later review/calibration learns from and `applications` only holds a
+        thin snapshot (no description). Both tables key on the same (source_key, job_id)."""
         rows = self.connection.execute(
-            "SELECT * FROM jobs WHERE status='closed' AND last_seen_at < ? ORDER BY last_seen_at",
+            "SELECT * FROM jobs j WHERE j.status='closed' AND j.last_seen_at < ?"
+            " AND NOT EXISTS (SELECT 1 FROM applications a"
+            "   WHERE a.source_key=j.source_key AND a.job_id=j.job_id)"
+            " AND NOT EXISTS (SELECT 1 FROM job_feedback f"
+            "   WHERE f.source_key=j.source_key AND f.job_id=j.job_id)"
+            " ORDER BY j.last_seen_at",
             (before.isoformat(),),
         ).fetchall()
         return [dict(row) for row in rows]
 
     def delete_closed_jobs(self, before: datetime) -> dict[str, list[dict[str, Any]]]:
-        """Deletes every closed job last seen before `before`, cascading to that job's own
+        """Deletes every eligible closed job (see `find_stale_closed_jobs`: jobs with an application or
+        a feedback label are kept) last seen before `before`, cascading to that job's own
         `assessments`/`job_feedback` rows — an explicit choice (docs/retention-cleanup-plan.md
         section 3.6/4), not an oversight: neither table has a real foreign key to `jobs`, so
         leaving them behind wouldn't break anything, but a deleted job's assessment/feedback has

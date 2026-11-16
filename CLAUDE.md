@@ -190,7 +190,14 @@ ranked `SearchResult` JSON.
   before matching (Torc's Greenhouse postings render `—` as literal `&mdash;` inside a separator
   `<span>`). `storage.py`'s `reevaluate_salary()`/`reevaluate_sponsorship()` (also CLI commands)
   backfill stored jobs from existing description, no network — needed since `upsert_job` only sets
-  these on fresh collection.
+  these on fresh collection. Also matches `between $X and $Y` ("and" counts only right after
+  "between", `$` on both sides). **Pay text outside the description:** `extras.salary_source_text(description,
+  extras)` is what both the collector and `reevaluate_salary()` feed to `evaluate_salary` — the description plus
+  `extras["detail"]["pay_text"]` when an adapter stored one. Apple keeps its range in the `postingFooters`
+  "Pay & Benefits" entry, not `description` (only ~66 of ~5,600 stored Apple jobs had a `$` before this), so
+  `apple.py` puts it in `pay_text` and drops the other footers; extras (not the description) so `content_hash` is
+  unchanged and no job is re-reviewed. Existing Apple jobs need `search --companies apple --refresh-details`
+  then `reevaluate-salary` to gain a salary. Another site with pay outside its description: set `pay_text`.
 
 - **`prefilter.py`** — `passes_prefilter`'s positive-term gate matches only `job.title` +
   `job.department`, never free-text `description`. Deliberate fix: description-wide matching let
@@ -496,7 +503,7 @@ ranked `SearchResult` JSON.
   is treated as unassessed again. Lets `job-hunter`'s per-job sub-agent review skip already-scored
   jobs at zero token cost.
 
-  No table ever deletes rows automatically — 230MB after 9 days, 98.5% `jobs.description`, closed
+  `find_stale_closed_jobs` (used by both the cleanup dry run and delete) never selects a job that has an `applications` row or a `job_feedback` label, so the posting text you acted on survives for later calibration (`applications` keeps only a thin snapshot, no description). No table ever deletes rows automatically — 230MB after 9 days, 98.5% `jobs.description`, closed
   rows kept forever. `job-hunter cleanup` (`cleanup.py`, opt-in, dry-run by default,
   `docs/retention-cleanup-plan.md`) is the answer, reusing `last_seen_at` as a free "days since
   closed" clock (`mark_missing()` never touches it on close — it already means "last confirmed

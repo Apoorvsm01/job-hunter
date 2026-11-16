@@ -81,3 +81,23 @@ def description_keys(config: dict[str, Any]) -> list[str]:
                 keys.append(path.split(".")[0])
     keys.append("description")
     return keys
+
+
+PAY_TEXT_KEY = "pay_text"
+
+
+def salary_source_text(description: str | None, extras: dict[str, Any] | str | None) -> str | None:
+    """The text `salary.evaluate_salary` reads: the description plus, when an adapter stored one,
+    `extras["detail"]["pay_text"]` -- pay wording the site keeps outside its description (Apple's
+    "Pay & Benefits" footer). Kept in extras rather than the description so `content_hash` is
+    untouched and no job is re-reviewed. `extras` may be the dict or its stored JSON."""
+    if isinstance(extras, str):
+        try:
+            extras = json.loads(extras)
+        except ValueError:
+            extras = None
+    detail = extras.get("detail") if isinstance(extras, dict) else None
+    pay = detail.get(PAY_TEXT_KEY) if isinstance(detail, dict) else None
+    if not isinstance(pay, str) or not pay.strip():
+        return description
+    return f"{description}\n{pay}" if description else pay

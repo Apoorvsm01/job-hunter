@@ -13,7 +13,7 @@ import httpx
 from .adapters import adapter_class
 from .adapters.base import ListingTimeout, RateLimitError
 from .config import CandidateProfile, CompanyConfig, Settings
-from .extras import build_extras, compact_extras, description_keys
+from .extras import build_extras, compact_extras, description_keys, salary_source_text
 from .health import detect_count_anomaly, detect_field_coverage
 from .location import evaluate_location
 from .models import (
@@ -367,7 +367,8 @@ class Collector:
                     )
                     description = detail.description if detail else (prior["description"] if prior else None)
                     sponsorship = evaluate_sponsorship(description)
-                    salary = evaluate_salary(description)
+                    job_extras = _job_extras(summary, detail, prior, company.config)
+                    salary = evaluate_salary(salary_source_text(description, job_extras))
                     decision = (
                         evaluate_location(
                             (
@@ -438,7 +439,7 @@ class Collector:
                             if detail
                             else (prior["application_deadline"] if prior else None)
                         ),
-                        extras=_job_extras(summary, detail, prior, company.config),
+                        extras=job_extras,
                         content_hash=description_hash(description),
                         last_seen_at=datetime.now(UTC),
                     )

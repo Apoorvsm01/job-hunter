@@ -305,7 +305,6 @@ def test_delete_closed_jobs_cascades_to_assessments_and_feedback(tmp_path):
         storage.connection.execute("UPDATE jobs SET status='closed' WHERE job_id='stale'")
         storage.connection.commit()
         storage.upsert_assessment(make_assessment(job_id="stale"))
-        storage.upsert_job_feedback(make_feedback(source_key="acme", job_id="stale", title="Engineer"))
 
         # A second, unrelated closed-but-recent job must survive untouched.
         storage.upsert_job(make_job(job_id="recent"))
@@ -317,7 +316,7 @@ def test_delete_closed_jobs_cascades_to_assessments_and_feedback(tmp_path):
 
         assert [row["job_id"] for row in deleted["jobs"]] == ["stale"]
         assert [row["job_id"] for row in deleted["assessments"]] == ["stale"]
-        assert [row["job_id"] for row in deleted["job_feedback"]] == ["stale"]
+        assert deleted["job_feedback"] == []
 
         assert storage.get_job("acme", "stale") is None
         assert ("acme", "stale") not in storage.all_assessments()
@@ -712,6 +711,28 @@ def test_feedback_tombstone_reader(tmp_path):
         assert storage.get_feedback_tombstone("apple", "99") == _t(3).isoformat()
 
 
+def test_cleanup_keeps_closed_jobs_you_applied_to_or_labelled(tmp_path):
+    """The posting text of a job with an application row or a feedback label is the evidence
+    later calibration learns from, so a stale closed job like that is not eligible at all."""
+    now = datetime.now(UTC)
+    old = now - timedelta(days=30)
+    with Storage(tmp_path / "jobs.sqlite3") as storage:
+        for job_id in ("applied", "labelled", "plain"):
+            storage.upsert_job(make_job(job_id=job_id, last_seen_at=old))
+        storage.connection.execute("UPDATE jobs SET status='closed'")
+        storage.connection.commit()
+        _apply(storage, 0, {"status": ApplicationStatus.APPLIED}, key=("acme", "applied"))
+        storage.upsert_job_feedback(make_feedback(source_key="acme", job_id="labelled", title="Engineer"))
+
+        cutoff = now - timedelta(days=10)
+        assert [j["job_id"] for j in storage.find_stale_closed_jobs(cutoff)] == ["plain"]
+        storage.delete_closed_jobs(cutoff)
+        assert storage.get_job("acme", "applied") is not None
+        assert storage.get_job("acme", "labelled") is not None
+        assert storage.get_job("acme", "plain") is None
+        assert storage.feedback_map()  # the label survived with its job
+
+
 def test_cleanup_never_touches_applications_or_their_tombstones(tmp_path):
     now = datetime.now(UTC)
     with Storage(tmp_path / "jobs.sqlite3") as storage:
@@ -720,8 +741,11 @@ def test_cleanup_never_touches_applications_or_their_tombstones(tmp_path):
         storage.connection.commit()
         _apply(storage, 0, {"status": ApplicationStatus.APPLIED}, key=("acme", "stale"))
         _apply(storage, 1, {"status": None}, key=("acme", "other"), snapshot=None)
+        storage.upsert_job(make_job(job_id="plain", last_seen_at=now - timedelta(days=30)))
+        storage.connection.execute("UPDATE jobs SET status='closed' WHERE job_id='plain'")
+        storage.connection.commit()
         deleted = storage.delete_closed_jobs(now - timedelta(days=7))
-        assert [j["job_id"] for j in deleted["jobs"]] == ["stale"]
+        assert [j["job_id"] for j in deleted["jobs"]] == ["plain"]  # the applied job is kept
         assert set(deleted) == {"jobs", "assessments", "job_feedback"}  # return shape unchanged
         assert storage.get_application("acme", "stale")["status"] == "applied"
         assert storage.get_application_tombstone("acme", "other") is not None

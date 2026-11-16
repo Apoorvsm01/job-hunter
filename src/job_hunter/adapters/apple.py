@@ -5,7 +5,7 @@ import json
 import re
 from urllib.parse import parse_qsl, urljoin, urlsplit, urlunsplit
 
-from ..extras import compact_extras
+from ..extras import PAY_TEXT_KEY, compact_extras
 from ..models import JobDetail, JobSummary
 from ..normalizer import normalize_text, parse_flexible_date, stringify
 from ..prefilter import is_recent
@@ -33,6 +33,25 @@ def _extract_hydration_data(text: str) -> dict:
         return json.loads(unescaped)
     except json.JSONDecodeError as exc:
         raise SchemaError("Apple hydration data is not valid JSON") from exc
+
+
+def _pay_text(job: dict) -> str | None:
+    """The "Pay & Benefits" posting footer. Apple keeps the stated base-pay range there, not in
+    `description` (so it is stored in extras; see `extras.salary_source_text`)."""
+    for footer in job.get("postingFooters") or []:
+        localized = (footer.get("localizations") or {}).get("en_US") or []
+        for entry in localized:
+            if "pay" in str(entry.get("name") or "").lower() and entry.get("content"):
+                return str(entry["content"]).strip()
+    return None
+
+
+def _detail_extras(job: dict) -> dict:
+    extras = compact_extras(job, skip_keys=("description", "jobSummary", "postingFooters"))
+    pay = _pay_text(job)
+    if pay:
+        extras[PAY_TEXT_KEY] = pay
+    return extras
 
 
 def _location_fields(location: dict) -> tuple[str | None, str | None, str | None]:
@@ -152,5 +171,5 @@ class AppleAdapter(JobAdapter):
             state=state,
             country=country,
             posted_at=parse_flexible_date(job.get("postDateInGMT")),
-            extras=compact_extras(job, skip_keys=("description", "jobSummary")) or None,
+            extras=_detail_extras(job) or None,
         )
