@@ -36,7 +36,10 @@ def test_extract_json_raises_on_garbage():
 
 @respx.mock
 def test_review_one_posts_expected_payload_and_parses_verdict():
-    verdict = {"score": 91, "recommended": True, "matches": ["Python", "ADAS"], "gaps": ["No ROS"]}
+    verdict = {
+        "domain_fit": "core", "seniority_fit": "match", "blockers": [],
+        "score": 91, "recommended": True, "matches": ["Python", "ADAS"], "gaps": ["No ROS"],
+    }
 
     def _respond(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
@@ -103,7 +106,10 @@ def test_run_review_writes_progress_log_and_final_summary(tmp_path, monkeypatch)
     monkeypatch.setattr(
         review_with_lm_studio, "check_lm_studio", lambda config: (True, "http://fake/v1 -- ok")
     )
-    verdict = {"score": 88, "recommended": True, "matches": ["Python", "ADAS"], "gaps": ["No ROS"]}
+    verdict = {
+        "domain_fit": "core", "seniority_fit": "match", "blockers": [],
+        "score": 88, "recommended": True, "matches": ["Python", "ADAS"], "gaps": ["No ROS"],
+    }
     respx.post("http://127.0.0.1:1234/v1/chat/completions").mock(
         return_value=httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(verdict)}}]})
     )

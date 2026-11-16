@@ -118,6 +118,10 @@ class Assessment(BaseModel):
     recommended: bool
     matches: list[str] = Field(default_factory=list)
     gaps: list[str] = Field(default_factory=list)
+    # Structured judgments from the review prompt (None on assessments made before it existed).
+    domain_fit: Literal["core", "adjacent", "off"] | None = None
+    seniority_fit: Literal["below", "match", "above"] | None = None
+    blockers: list[str] = Field(default_factory=list)
     resume_path: str | None = None
     assessed_at: datetime = Field(default_factory=utcnow)
 

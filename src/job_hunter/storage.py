@@ -119,6 +119,17 @@ def _migrate_v8_add_salary_tiers(connection: sqlite3.Connection) -> None:
         connection.execute("ALTER TABLE jobs ADD COLUMN salary_tiers TEXT")
 
 
+def _migrate_v9_add_assessment_facets(connection: sqlite3.Connection) -> None:
+    """`assessments.domain_fit`/`seniority_fit`/`blockers`: the review prompt's structured judgments."""
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(assessments)")}
+    if "domain_fit" not in columns:
+        connection.execute("ALTER TABLE assessments ADD COLUMN domain_fit TEXT")
+    if "seniority_fit" not in columns:
+        connection.execute("ALTER TABLE assessments ADD COLUMN seniority_fit TEXT")
+    if "blockers" not in columns:
+        connection.execute("ALTER TABLE assessments ADD COLUMN blockers TEXT")
+
+
 #: Ordered, 1-indexed migration steps — entry `N` (1-based) upgrades a database from schema
 #: version `N-1` to version `N`. Tracked via SQLite's own built-in `PRAGMA user_version` integer
 #: (docs/agent-runtime-audit.md's "no explicit schema-version marker" finding) rather than a
@@ -139,6 +150,7 @@ _MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
     _migrate_v6_add_application_deadline,
     _migrate_v7_add_extras,
     _migrate_v8_add_salary_tiers,
+    _migrate_v9_add_assessment_facets,
 ]
 
 
@@ -586,12 +598,15 @@ class Storage:
     def upsert_assessment(self, assessment: Assessment) -> None:
         self.connection.execute(
             """INSERT INTO assessments(source_key, job_id, company, title, url, content_hash,
-               score, recommended, matches, gaps, resume_path, assessed_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               score, recommended, matches, gaps, resume_path, assessed_at,
+               domain_fit, seniority_fit, blockers)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(source_key, job_id) DO UPDATE SET company=excluded.company,
                title=excluded.title, url=excluded.url, content_hash=excluded.content_hash,
                score=excluded.score, recommended=excluded.recommended, matches=excluded.matches,
-               gaps=excluded.gaps, resume_path=excluded.resume_path, assessed_at=excluded.assessed_at""",
+               gaps=excluded.gaps, resume_path=excluded.resume_path, assessed_at=excluded.assessed_at,
+               domain_fit=excluded.domain_fit, seniority_fit=excluded.seniority_fit,
+               blockers=excluded.blockers""",
             (
                 assessment.source_key,
                 assessment.job_id,
@@ -605,6 +620,9 @@ class Storage:
                 json.dumps(assessment.gaps),
                 assessment.resume_path,
                 assessment.assessed_at.isoformat(),
+                assessment.domain_fit,
+                assessment.seniority_fit,
+                json.dumps(assessment.blockers),
             ),
         )
         self.connection.commit()
@@ -622,6 +640,9 @@ class Storage:
             recommended=bool(row["recommended"]),
             matches=json.loads(row["matches"]),
             gaps=json.loads(row["gaps"]),
+            domain_fit=row["domain_fit"],
+            seniority_fit=row["seniority_fit"],
+            blockers=json.loads(row["blockers"] or "[]"),
             resume_path=row["resume_path"],
             assessed_at=row["assessed_at"],
         )
@@ -676,6 +697,7 @@ class Storage:
             item = dict(row)
             item["matches"] = json.loads(item["matches"])
             item["gaps"] = json.loads(item["gaps"])
+            item["blockers"] = json.loads(item.get("blockers") or "[]")
             item["recommended"] = bool(item["recommended"])
             results.append(item)
         return results

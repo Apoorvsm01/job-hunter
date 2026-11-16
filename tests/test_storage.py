@@ -865,3 +865,36 @@ def test_salary_tiers_roundtrip_and_reevaluate_salary_backfills_min_max_and_tier
         assert (row["salary_min"], row["salary_max"], row["salary_evidence"]) == (184000.0, 356500.0, "$184,000 - $356,500")
         assert [t["label"] for t in json.loads(row["salary_tiers"])] == ["Level 4", "Level 5"]
         assert storage.reevaluate_salary() == 0  # idempotent
+
+
+def test_assessment_facets_round_trip_and_default_for_legacy_rows(tmp_path):
+    with Storage(tmp_path / "jobs.sqlite3") as storage:
+        storage.upsert_assessment(
+            make_assessment(job_id="new", domain_fit="adjacent", seniority_fit="above", blockers=["clearance"])
+        )
+        storage.upsert_assessment(make_assessment(job_id="legacy"))  # an assessment made before facets
+        new = storage.all_assessments()[("acme", "new")]
+        assert (new.domain_fit, new.seniority_fit, new.blockers) == ("adjacent", "above", ["clearance"])
+        legacy = storage.all_assessments()[("acme", "legacy")]
+        assert (legacy.domain_fit, legacy.seniority_fit, legacy.blockers) == (None, None, [])
+        exported = {r["job_id"]: r for r in storage.export_assessments()}
+        assert exported["new"]["blockers"] == ["clearance"] and exported["legacy"]["domain_fit"] is None
+
+
+def test_v9_migration_adds_assessment_facet_columns_to_an_older_database(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "old.sqlite3"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        "CREATE TABLE assessments (source_key TEXT NOT NULL, job_id TEXT NOT NULL, company TEXT NOT NULL,"
+        " title TEXT NOT NULL, url TEXT NOT NULL, content_hash TEXT, score INTEGER NOT NULL,"
+        " recommended INTEGER NOT NULL, matches TEXT NOT NULL, gaps TEXT NOT NULL, resume_path TEXT,"
+        " assessed_at TEXT NOT NULL, PRIMARY KEY(source_key, job_id));"
+        "INSERT INTO assessments VALUES ('acme','1','Acme','T','u','h',80,1,'[]','[]',NULL,'2026-01-01T00:00:00+00:00');"
+    )
+    conn.commit()
+    conn.close()
+    with Storage(path) as storage:
+        old = storage.all_assessments()[("acme", "1")]
+        assert old.score == 80 and old.domain_fit is None and old.blockers == []

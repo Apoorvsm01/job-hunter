@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, TextIO
 
 import httpx
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import ValidationError
 
 from job_hunter.active_pool import fallback_candidates
 from job_hunter.atomic import atomic_write_text
@@ -40,6 +40,13 @@ from job_hunter.config import CandidateProfile, load_profile, load_settings
 from job_hunter.lm_studio_health import check_lm_studio, load_lm_studio_config
 from job_hunter.models import Assessment
 from job_hunter.resume_source import resolve_master_resume
+from job_hunter.review_prompt import (
+    ModelVerdict,
+    apply_caps,
+    clean_descriptions,
+    domain_definition,
+    history_block,
+)
 from job_hunter.rootutil import add_project_argument, chdir_to_project_root, nonneg_int
 from job_hunter.runlock import RunLockHeld, run_lock_or_inherited
 from job_hunter.search_archive import resolve_search_path
@@ -82,9 +89,21 @@ Apply a strict, evidence-based standard:
     - 60-74: Partial fit; several important requirements or the expected scope are not evidenced.
     - 40-59: Weak fit; limited relevant overlap or major qualification gaps.
     - 0-39: Poor fit; fundamentally mismatched domain, responsibilities, or seniority.
-12. Set "recommended" to true only when score is at least {threshold} and no clearly unmet
-    hard requirement makes the candidate unsuitable.
+    Fewer than about 1 in 10 postings deserve 80 or more. When unsure between two bands, choose the
+    lower one. A matching job title or method alone never earns a high score.
+12. Fill in the judgments BEFORE the score; they decide how high the score can go. A system
+    applies ceilings after you answer: domain_fit "off" caps the score at 49, "adjacent" at 74,
+    any blocker at 69, and a seniority_fit other than "match" at 74. Be accurate on the
+    judgments; they matter more than the exact number.
+    - domain_fit: use the DOMAIN DEFINITION below.
+    - seniority_fit: "match" unless the posting's stated level or years clearly exceed ("above")
+      or sit well under ("below") what the resume evidences.
+    - blockers: hard requirements the resume clearly does not meet (a required clearance,
+      license, degree, or years of a specific skill). Empty list when there are none. A
+      preferred qualification is never a blocker.
+13. Set "recommended" to true only when score is at least {threshold} and there is no blocker.
 
+{context}
 Before assigning the final score, internally compare every major job requirement with resume
 evidence. Do not output that internal reasoning. Return only the required JSON.
 
@@ -94,24 +113,13 @@ issue, whether it is missing / weaker than requested / simply not evidenced, and
 fitness for this role.
 
 Respond with ONLY a single JSON object — no prose before or after it, no markdown code fence —
-matching exactly this schema:
-{{"score": <integer 0-100>, "recommended": <true or false>, "matches": [<2 to 4 concise evidence-based strings>], "gaps": [<1 to 3 concise evidence-based strings>]}}
+with the keys in exactly this order, matching this schema:
+{{"domain_fit": "core" | "adjacent" | "off", "seniority_fit": "below" | "match" | "above", "blockers": [<0 to 3 short strings>], "matches": [<2 to 4 concise evidence-based strings>], "gaps": [<1 to 3 concise evidence-based strings>], "score": <integer 0-100>, "recommended": <true or false>}}
 
 Scoring Rubric:
 {rubric}
 """
 
-
-class ModelVerdict(BaseModel):
-    """Strict schema for a local model's raw JSON verdict — rejects out-of-range scores,
-    malformed booleans (e.g. the string "false", which Python treats as truthy), and
-    evidence lists outside the sizes the prompt asks for, rather than silently coercing
-    them."""
-
-    score: int = Field(ge=0, le=100)
-    recommended: bool
-    matches: list[str] = Field(min_length=2, max_length=4)
-    gaps: list[str] = Field(min_length=1, max_length=3)
 
 _USER_PROMPT = """RESUME:
 {resume}
@@ -155,6 +163,7 @@ def review_one(
     url: str,
     description: str,
     threshold: int = 75,
+    context: str = "",
 ) -> dict[str, Any]:
     """Send exactly one job to the local model and return its parsed, validated verdict."""
     response = client.post(
@@ -165,7 +174,7 @@ def review_one(
             "messages": [
                 {
                     "role": "system",
-                    "content": _SYSTEM_PROMPT.format(rubric=rubric, threshold=threshold),
+                    "content": _SYSTEM_PROMPT.format(rubric=rubric, threshold=threshold, context=context),
                 },
                 {
                     "role": "user",
@@ -189,7 +198,7 @@ def review_one(
         verdict = ModelVerdict.model_validate(raw_verdict)
     except ValidationError as exc:
         raise ValueError(f"model verdict failed schema validation: {exc}") from exc
-    return verdict.model_dump()
+    return apply_caps(verdict.model_dump(), threshold=threshold)
 
 
 def _refresh_export(storage: Storage, database_path: Path) -> None:
@@ -336,6 +345,11 @@ def main() -> int:
 
     with Storage(settings.database_path) as storage:
         to_review, skipped_cached = storage.partition_candidates_for_review(candidates, force=args.force)
+        # Fixed for the whole run so the prompt prefix is identical for every job (cache-friendly).
+        context = domain_definition(profile) + "\n" + history_block(
+            storage.export_applications(), storage.export_job_feedback()
+        )
+    descriptions = clean_descriptions(to_review)
     if args.limit is not None:
         to_review = to_review[: args.limit]
 
@@ -357,6 +371,7 @@ def main() -> int:
             return _run_review(
                 to_review, skipped_cached, config, settings, profile, resume, rubric,
                 result_json=args.result_json, progress_log=args.progress_log,
+                context=context, descriptions=descriptions,
             )
     except RunLockHeld as exc:
         print(
@@ -405,6 +420,7 @@ def _eta_suffix(started: float, done: int, total: int) -> str:
 def _run_review(
     to_review, skipped_cached, config, settings, profile, resume, rubric, *,
     result_json: Path | None = None, progress_log: Path | None = None,
+    context: str = "", descriptions: dict[tuple[str, str], str] | None = None,
 ) -> int:
     reachable, detail = check_lm_studio(config)
     if not reachable:
@@ -453,8 +469,11 @@ def _run_review(
                         company=candidate["company"],
                         location=candidate.get("location_raw") or "",
                         url=candidate["url"],
-                        description=candidate.get("description") or "",
+                        description=(descriptions or {}).get(
+                            (source_key, job_id), candidate.get("description") or ""
+                        ),
                         threshold=profile.minimum_recommendation_score,
+                        context=context,
                     )
                 except Exception as exc:  # a bad response must not stop the remaining jobs
                     _announce(f"  skipped: {exc}", err=True)
