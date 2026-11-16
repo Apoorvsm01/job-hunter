@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -12,7 +13,8 @@ import httpx
 from .adapters import adapter_class
 from .adapters.base import ListingTimeout, RateLimitError
 from .config import CandidateProfile, CompanyConfig, Settings
-from .health import detect_count_anomaly
+from .extras import build_extras, compact_extras, description_keys
+from .health import detect_count_anomaly, detect_field_coverage
 from .location import evaluate_location
 from .models import (
     HealthStatus,
@@ -59,6 +61,21 @@ def _partial_message(exc: BaseException, kept: int) -> str:
         f"{reason}; kept {kept} job(s) fetched before it stopped; "
         "remainder not collected, will retry next run"
     )
+
+
+def _job_extras(summary, detail, prior, config) -> dict | None:
+    """`jobs.extras` (see extras.py): the listing item is re-captured every run (it is already in
+    hand); the detail payload only when a detail was fetched this run, otherwise the stored one is
+    kept so a no-refetch run never discards it."""
+    stored: dict = {}
+    if prior is not None and prior["extras"]:
+        try:
+            stored = json.loads(prior["extras"])
+        except ValueError:
+            stored = {}
+    listing = compact_extras(summary.raw, skip_keys=description_keys(config))
+    detail_part = (detail.extras if detail and detail.extras else None) or (stored.get("detail") if not detail else None)
+    return build_extras(listing, detail_part)
 
 
 class Collector:
@@ -258,6 +275,12 @@ class Collector:
                         health, previous_count,
                         int(company.config.get("anomaly_minimum_previous", 20)),
                     )
+                    # A field the listing pass itself should fill (e.g. Workday's job-family facet
+                    # mapped to department); a facet that silently stopped working shows up here.
+                    health = detect_field_coverage(
+                        health, summaries, company.config.get("expect_listing_fields"),
+                        int(company.config.get("expect_detail_min_sample", 10)), what="listing items",
+                    )
                 else:
                     health = SourceHealth(
                         source_key=company.key,
@@ -318,6 +341,11 @@ class Collector:
                 details = await asyncio.gather(
                     *(_detail_for(summary, prior) for summary, prior in zip(summaries, priors, strict=True))
                 )
+                health = detect_field_coverage(
+                    health, [d for d in details if d is not None],
+                    company.config.get("expect_detail_fields"),
+                    int(company.config.get("expect_detail_min_sample", 10)),
+                )
                 jobs: list[Job] = []
                 for summary, prior, detail in zip(summaries, priors, details, strict=True):
                     # A structured country/state a previous run's detail fetch already
@@ -369,6 +397,12 @@ class Collector:
                     )
                     values = summary.model_dump(exclude={"raw"})
                     values.update(
+                        # A detail-only department (Ford's Category) is never on the listing, so
+                        # without the prior fallback a run that skips the detail fetch would blank it.
+                        department=(
+                            detail.department if detail and detail.department
+                            else (summary.department or (prior["department"] if prior else None))
+                        ),
                         city=(detail.city if detail and detail.city else summary.city),
                         state=decision.state or summary.state,
                         country=decision.country or summary.country,
@@ -396,6 +430,15 @@ class Collector:
                             else ("USD" if salary.evidence else None)
                         ),
                         salary_evidence=salary.evidence,
+                        salary_tiers=[t.as_dict() for t in salary.tiers] or None,
+                        # Only a fresh detail fetch can state a deadline; otherwise keep what is
+                        # already stored rather than blanking it on a no-detail run.
+                        application_deadline=(
+                            detail.application_deadline
+                            if detail
+                            else (prior["application_deadline"] if prior else None)
+                        ),
+                        extras=_job_extras(summary, detail, prior, company.config),
                         content_hash=description_hash(description),
                         last_seen_at=datetime.now(UTC),
                     )

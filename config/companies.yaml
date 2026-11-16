@@ -55,6 +55,13 @@ companies:
       # posting); .../en-US/Careers_GM/ renders correctly and shows the right job.
       workday_native: true
       list_url: https://generalmotors.wd5.myworkdayjobs.com/wday/cxs/generalmotors/Careers_GM/jobs
+      # Workday states a job's family only as a listing facet, so department comes from querying
+      # each `jobFamily` value once (WorkdayAdapter._apply_department_facet). Measured on the real
+      # prefilter before enabling: GM +18 jobs / 0 losses (its "Systems Engineering" family); Nvidia
+      # (+25/-16, a family literally named "Program Manager") and Caterpillar/Valeo (no genuine
+      # gain) are deliberately left off. The warning below fires if the facet stops filling it.
+      department_facet: jobFamily
+      expect_listing_fields: {department: 0.7}
       public_base_url: https://generalmotors.wd5.myworkdayjobs.com/en-US/Careers_GM/
   - key: ford
     company: Ford Motor Company
@@ -83,6 +90,17 @@ companies:
       # ExternalQualificationsStr (6.6KB) held the actual qualifications *and* each job's
       # visa-sponsorship statement, entirely missed until this was added.
       detail_description_path: [ExternalDescriptionStr, ExternalResponsibilitiesStr, ExternalQualificationsStr]
+      # "Apply Before" on the candidate page: only the per-job detail call carries it (the listing's
+      # PostingEndDate is always null). Midnight UTC, shown to candidates in their own timezone.
+      detail_deadline_path: ExternalPostedEndDate
+      # department: the listing has no function field (JobFunction/Category/JobFamily are null on
+      # every listing item), but the detail record's `Category` is a real functional area ("PD
+      # Operations and Quality", "Manufacturing", "Enterprise Technology", ...) -- ~83% filled.
+      # Mapped here because prefilter's positive gate and soft_exclude read title + department.
+      detail_department_path: Category
+      # Warn (never fail) if a run's fresh details stop carrying it -- Oracle changing/renaming the
+      # field would otherwise silently turn every department back to empty. See docs/SPEC.md.
+      expect_detail_fields: {department: 0.5}
       public_url_template: https://efds.fa.em5.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1/job/{id}
       fields:
         id: Id

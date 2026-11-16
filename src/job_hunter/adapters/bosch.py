@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
+from ..extras import compact_extras
 from ..models import JobDetail, JobSummary
 from .base import SchemaError, nested
 from .json_api import ConfigurableJsonAdapter
@@ -84,7 +85,13 @@ class BoschAdapter(ConfigurableJsonAdapter):
             for name in self._DETAIL_SECTIONS
             if (text := nested(sections, f"{name}.text"))
         ]
-        return JobDetail(description="\n\n".join(parts) or None)
+        # Everything but the section texts (already folded into `description`): refNumber, title,
+        # location/contract fields, and whatever else the job ad record carries.
+        record = dict(payload[0])
+        job_ad = dict(record.get("jobAd") or {})
+        job_ad.pop("sections", None)
+        record["jobAd"] = job_ad
+        return JobDetail(description="\n\n".join(parts) or None, extras=compact_extras(record) or None)
 
 
 def _with_query(url: str, params: dict) -> str:

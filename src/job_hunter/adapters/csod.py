@@ -3,6 +3,7 @@ from __future__ import annotations
 import html as html_module
 import re
 
+from ..extras import compact_extras
 from ..models import JobDetail, JobSummary
 from ..normalizer import (
     extract_job_posting_ld,
@@ -137,4 +138,5 @@ class CsodAdapter(JobAdapter):
         return JobDetail(
             description=normalize_text(html_module.unescape(description)) if description else None,
             posted_at=parse_flexible_date(posted_at),
+            extras=compact_extras(posting, skip_keys=("Description", "description")) or None,
         )

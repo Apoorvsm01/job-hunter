@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import logging
+import re
+from datetime import datetime
 
+from ..extras import compact_extras
 from ..location import detect_arrangement
 from ..models import JobDetail, JobSummary
 from ..normalizer import fallback_job_id, parse_flexible_date, parse_relative_posted, stringify
@@ -9,6 +12,19 @@ from .base import SchemaError
 from .json_api import ConfigurableJsonAdapter
 
 logger = logging.getLogger(__name__)
+
+
+def _end_date(value: object) -> datetime | None:
+    """Workday's `endDate` ("2026-12-20", Valeo's "End Date: December 20, 2026") is a calendar date,
+    not an instant. Midnight UTC would display as the previous evening in US timezones, so a
+    date-only value is stored as the end of that day (23:59:59 UTC)."""
+    text = stringify(value)
+    if not text:
+        return None
+    parsed = parse_flexible_date(text)
+    if parsed is not None and re.fullmatch(r"\d{4}-\d{2}-\d{2}", text.strip()):
+        parsed = parsed.replace(hour=23, minute=59, second=59)
+    return parsed
 
 
 class WorkdayAdapter(ConfigurableJsonAdapter):
@@ -23,6 +39,7 @@ class WorkdayAdapter(ConfigurableJsonAdapter):
         offset = 0
         jobs = self.begin_listing()
         total: int | None = None
+        facets: list | None = None
         while offset < int(cfg.get("max_jobs", 2000)):
             payload = {
                 "appliedFacets": cfg.get("applied_facets", {}),
@@ -32,6 +49,8 @@ class WorkdayAdapter(ConfigurableJsonAdapter):
             }
             response = await self.request("POST", url, json=payload)
             data = response.json()
+            if facets is None:
+                facets = data.get("facets") or []
             items = data.get("jobPostings")
             if not isinstance(items, list):
                 raise SchemaError("Workday response lacks jobPostings list")
@@ -101,7 +120,50 @@ class WorkdayAdapter(ConfigurableJsonAdapter):
                 total = int(data.get("total", offset))
             if not items or offset >= total:
                 break
+        if cfg.get("department_facet"):
+            await self._apply_department_facet(jobs, facets or [], url, limit)
         return jobs
+
+    async def _apply_department_facet(
+        self, jobs: list[JobSummary], facets: list, url: str, limit: int
+    ) -> None:
+        """Workday never states a job's family on the job itself, only as a listing facet
+        (`jobFamily`/`jobFamilyGroup`). With `department_facet: <facetParameter>` this queries each
+        facet value once (every job is in exactly one, so ~one extra pass over the listing) and sets
+        each job's `department` to its family descriptor, matched by `externalPath`. Opt-in per
+        source: measured to help GM (its "Systems Engineering" family) and to add noise elsewhere
+        (Nvidia's family literally named "Program Manager"). Never fails the listing: a missing
+        facet or a failed query just leaves departments empty, and `expect_listing_fields` turns
+        that into a visible warning."""
+        cfg = self.company.config
+        name = str(cfg["department_facet"])
+        try:
+            facet = next((f for f in facets if f.get("facetParameter") == name), None)
+            if facet is None:
+                raise SchemaError(f"facet {name!r} is not in the Workday listing response")
+            family_by_path: dict[str, str] = {}
+            for value in facet.get("values") or []:
+                family_id, family = value.get("id"), stringify(value.get("descriptor"))
+                if not family_id or not family:
+                    continue  # a nested group, not a plain value
+                offset = 0
+                while offset < int(cfg.get("max_jobs", 2000)):
+                    payload = {
+                        "appliedFacets": {**cfg.get("applied_facets", {}), name: [family_id]},
+                        "limit": limit, "offset": offset, "searchText": "",
+                    }
+                    page = (await self.request("POST", url, json=payload)).json().get("jobPostings") or []
+                    for item in page:
+                        if item.get("externalPath"):
+                            family_by_path[item["externalPath"]] = family
+                    offset += len(page)
+                    if not page or offset >= int(value.get("count") or 0):
+                        break
+        except Exception as exc:  # noqa: BLE001 - deliberately never fails the listing
+            logger.warning("%s: department facet %r failed, departments left empty: %s", self.source_key, name, exc)
+            return
+        for job in jobs:
+            job.department = family_by_path.get((job.raw or {}).get("externalPath")) or job.department
 
     async def fetch_detail(self, summary: JobSummary) -> JobDetail:
         if not self.company.config.get("workday_native"):
@@ -134,4 +196,6 @@ class WorkdayAdapter(ConfigurableJsonAdapter):
             # startDate is an absolute date, more precise than the summary's relative postedOn text.
             posted_at=parse_flexible_date(info.get("startDate")) or parse_relative_posted(stringify(info.get("postedOn"))),
             work_arrangement=detect_arrangement(remote_type) if remote_type else None,
+            application_deadline=_end_date(info.get("endDate")),
+            extras=compact_extras(info, skip_keys=("jobDescription",)) or None,
         )

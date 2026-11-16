@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 from selectolax.parser import HTMLParser
 
+from ..extras import compact_extras
 from ..models import JobDetail, JobSummary
 from ..normalizer import fallback_job_id, normalize_text
 from .base import JobAdapter, SchemaError
@@ -133,7 +134,12 @@ class SuccessFactorsRmkV2Adapter(JobAdapter):
                 if text:
                     description = text
                     break
-        return JobDetail(description=description, posted_at=None)
+        # The page's other labelled fields (the same label -> value tokens the description came from).
+        return JobDetail(
+            description=description,
+            posted_at=None,
+            extras=compact_extras(tokens, skip_keys=("job description",)) or None,
+        )
 
 
 def _parse_job_layout_tokens(html: str) -> dict[str, str]:

@@ -6,6 +6,7 @@ from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 from selectolax.parser import HTMLParser
 
+from ..extras import compact_extras
 from ..models import JobDetail, JobSummary
 from ..normalizer import (
     extract_job_posting_ld,
@@ -177,6 +178,7 @@ class HtmlPaginatedAdapter(JobAdapter):
             description=description or None,
             posted_at=posted_at,
             employment_type=stringify(posting.get("employmentType")) if posting else None,
+            extras=compact_extras(posting, skip_keys=("description",)) or None if posting else None,
         )
 
 

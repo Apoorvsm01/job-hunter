@@ -641,6 +641,8 @@ async def test_phenom_detail_appends_embedded_pay_range():
         detail = await adapter.fetch_detail(summary)
     assert "Validate ADAS features" in detail.description
     assert "$84,500.00 - $105,600.00" in detail.description
+    # the page's other JSON-LD fields ride along in extras; the description is already stored
+    assert detail.extras and "description" not in detail.extras
     result = evaluate_salary(detail.description)
     assert (result.min_value, result.max_value) == (84500.0, 105600.0)
 
@@ -788,6 +790,41 @@ async def test_oracle_hcm_concatenates_multiple_description_fields():
         detail = await adapter.fetch_detail(jobs[0])
     assert "Build ADAS features." in detail.description
     assert "Visa sponsorship is not available" in detail.description
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_oracle_hcm_detail_reads_application_deadline_when_configured():
+    """Ford's "Apply Before" lives only in the per-job detail call (ExternalPostedEndDate); a null
+    value means no deadline, and a source that doesn't configure the path never reports one."""
+    base = "https://jobs.example/reqs?onlyData=true&finder=findReqs;offset=0"
+    respx.get(base).mock(return_value=httpx.Response(200, json=_oracle_page(["1", "2"], total=2)))
+    respx.get("https://jobs.example/details/1").mock(return_value=httpx.Response(
+        200, json={"ExternalDescriptionStr": "A", "Category": "Manufacturing", "ExternalPostedEndDate": "2027-01-31T00:00:00+00:00"}))
+    respx.get("https://jobs.example/details/2").mock(return_value=httpx.Response(
+        200, json={"ExternalDescriptionStr": "B", "ExternalPostedEndDate": None}))
+
+    def company(**extra):
+        return CompanyConfig(key="ford", company="Ford", adapter="oracle_hcm", config={
+            "paginate": True, "list_url": base, "items_path": "items.0.requisitionList",
+            "total_path": "items.0.TotalJobsCount", "detail_base_url": "https://jobs.example/details/",
+            "detail_description_path": ["ExternalDescriptionStr"],
+            "fields": {"id": "Id", "title": "Title", "url": "Id", "location": "PrimaryLocation"}, **extra,
+        })
+
+    async with httpx.AsyncClient() as client:
+        adapter = OracleHcmAdapter(company(detail_deadline_path="ExternalPostedEndDate", detail_department_path="Category"), client, CollectionConfig(max_retries=0))
+        jobs = await adapter.fetch_summaries()
+        with_deadline = await adapter.fetch_detail(jobs[0])
+        without = await adapter.fetch_detail(jobs[1])
+        unconfigured = await OracleHcmAdapter(company(), client, CollectionConfig(max_retries=0)).fetch_detail(jobs[0])
+    assert with_deadline.department == "Manufacturing"  # detail_department_path: Category
+    assert without.department is None
+    # everything the typed fields don't keep rides along in extras, minus the description field
+    assert with_deadline.extras == {"Category": "Manufacturing", "ExternalPostedEndDate": "2027-01-31T00:00:00+00:00"}
+    assert with_deadline.application_deadline.isoformat() == "2027-01-31T00:00:00+00:00"
+    assert without.application_deadline is None
+    assert unconfigured.application_deadline is None
 
 
 def _smartrecruiters_page(job_ids: list[str], total: int) -> dict:
@@ -1338,6 +1375,8 @@ async def test_html_detail_json_ld_fallback():
         jobs = await adapter.fetch_summaries()
         detail = await adapter.fetch_detail(jobs[0])
     assert detail.description == "Real description"
+    assert detail.extras == {"@context": "https://schema.org", "@type": "JobPosting",
+                             "datePosted": "2026-05-29", "employmentType": "FULL_TIME"}
     assert detail.posted_at == parse_flexible_date("2026-05-29")
     assert detail.employment_type == "FULL_TIME"
 
@@ -1553,6 +1592,8 @@ async def test_adp_recruiting_token_handshake_and_pagination():
     assert jobs[0].posted_at is not None
     assert "Build cars." in detail.description
     assert "5 years experience." in detail.description
+    # the listing item's other fields are kept for jobs.extras; the long description fields are not duplicated
+    assert jobs[0].raw["reqId"] == "1" and "jobDescription" not in jobs[0].raw and jobs[0].raw["description"]
 
 
 @pytest.mark.asyncio
@@ -2655,3 +2696,91 @@ async def test_html_placeholder_without_the_setting_is_still_a_schema_error():
     async with httpx.AsyncClient() as client:
         with pytest.raises(SchemaError):
             await HtmlPaginatedAdapter(company, client, CollectionConfig(max_retries=0)).fetch_summaries()
+
+
+@pytest.mark.asyncio
+@respx.mock
+@pytest.mark.parametrize(
+    ("end_date", "expected"),
+    [("2026-12-20", "2026-12-20T23:59:59+00:00"), ("2026-12-20T15:30:00+00:00", "2026-12-20T15:30:00+00:00"), (None, None)],
+)
+async def test_workday_native_detail_reads_end_date_as_application_deadline(end_date, expected):
+    """Valeo's Workday detail carries `endDate` ("End Date: December 20, 2026"). A date-only value is
+    stored as the end of that day so it never displays as the evening before in US timezones."""
+    list_url = "https://tenant.wd1.myworkdayjobs.com/wday/cxs/tenant/site/jobs"
+    respx.post(list_url).mock(return_value=httpx.Response(200, json={"total": 1, "jobPostings": [
+        {"title": "R", "externalPath": "/job/C/R_JR-1", "jobId": "JR-1", "postedOn": "Posted Today"}]}))
+    info = {"jobDescription": "d", "title": "R"}
+    if end_date:
+        info["endDate"] = end_date
+    respx.get("https://tenant.wd1.myworkdayjobs.com/wday/cxs/tenant/site/job/C/R_JR-1").mock(
+        return_value=httpx.Response(200, json={"jobPostingInfo": info}))
+    company = CompanyConfig(key="tenant", company="Tenant", adapter="workday", config={
+        "workday_native": True, "list_url": list_url,
+        "public_base_url": "https://tenant.wd1.myworkdayjobs.com/en-US/site/"})
+    async with httpx.AsyncClient() as client:
+        adapter = WorkdayAdapter(company, client, CollectionConfig(max_retries=0))
+        detail = await adapter.fetch_detail((await adapter.fetch_summaries())[0])
+    got = detail.application_deadline.isoformat() if detail.application_deadline else None
+    assert got == expected
+    assert "jobDescription" not in (detail.extras or {})
+
+
+def _workday_facet_mock(list_url, families, *, fail_family=None):
+    """Workday list endpoint: with no applied facet it returns every job plus the facet list; with
+    `jobFamily: [id]` it returns only that family's jobs (as the real CXS endpoint does)."""
+    jobs = {
+        "fam-sys": [("Systems Role", "/job/A/Systems-Role_JR-1"), ("AV Sensing Role", "/job/A/AV_JR-2")],
+        "fam-mfg": [("Plant Role", "/job/B/Plant_JR-3")],
+    }
+
+    def respond(request):
+        body = json.loads(request.content)
+        applied = (body.get("appliedFacets") or {}).get("jobFamily")
+        if applied and applied[0] == fail_family:
+            return httpx.Response(500)
+        chosen = jobs[applied[0]] if applied else [j for js in jobs.values() for j in js]
+        page = chosen[body["offset"] : body["offset"] + body["limit"]]
+        return httpx.Response(200, json={
+            "total": len(chosen),
+            "facets": [{"facetParameter": "jobFamily", "values": [
+                {"id": "fam-sys", "descriptor": "Systems Engineering", "count": 2},
+                {"id": "fam-mfg", "descriptor": "Manufacturing", "count": 1}]}],
+            "jobPostings": [{"title": t, "externalPath": p, "jobId": p.rsplit("_", 1)[1], "postedOn": "Posted Today"} for t, p in page],
+        })
+
+    respx.post(list_url).mock(side_effect=respond)
+
+
+def _workday_dept_company(list_url, **extra):
+    return CompanyConfig(key="tenant", company="Tenant", adapter="workday", config={
+        "workday_native": True, "list_url": list_url, "page_size": 2,
+        "public_base_url": "https://tenant.wd1.myworkdayjobs.com/en-US/site/", **extra})
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_workday_department_facet_maps_each_job_to_its_family_and_is_opt_in():
+    list_url = "https://tenant.wd1.myworkdayjobs.com/wday/cxs/tenant/site/jobs"
+    _workday_facet_mock(list_url, None)
+    async with httpx.AsyncClient() as client:
+        on = WorkdayAdapter(_workday_dept_company(list_url, department_facet="jobFamily"), client, CollectionConfig(max_retries=0))
+        jobs = await on.fetch_summaries()
+        off = WorkdayAdapter(_workday_dept_company(list_url), client, CollectionConfig(max_retries=0))
+        plain = await off.fetch_summaries()
+    assert {j.title: j.department for j in jobs} == {
+        "Systems Role": "Systems Engineering", "AV Sensing Role": "Systems Engineering", "Plant Role": "Manufacturing"}
+    assert all(j.department is None for j in plain)  # off unless configured
+
+
+@pytest.mark.asyncio
+@respx.mock
+@pytest.mark.parametrize("facet,fail", [("jobFamily", "fam-mfg"), ("noSuchFacet", None)])
+async def test_workday_department_facet_failure_never_fails_the_listing(facet, fail):
+    list_url = "https://tenant.wd1.myworkdayjobs.com/wday/cxs/tenant/site/jobs"
+    _workday_facet_mock(list_url, None, fail_family=fail)
+    async with httpx.AsyncClient() as client:
+        adapter = WorkdayAdapter(_workday_dept_company(list_url, department_facet=facet), client, CollectionConfig(max_retries=0))
+        jobs = await adapter.fetch_summaries()
+    assert len(jobs) == 3  # the listing itself is intact
+    assert all(j.department is None for j in jobs)  # a failed pass applies nothing, never a partial map

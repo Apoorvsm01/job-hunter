@@ -94,6 +94,11 @@ class JobDetail(BaseModel):
     salary_min: float | None = None
     salary_max: float | None = None
     salary_currency: str | None = None
+    # "Apply before" date when the platform's detail record states one (opt-in per source via
+    # `detail_deadline_path`). Display-only: never a filter, never part of content_hash.
+    application_deadline: datetime | None = None
+    # Detail-response fields the typed fields above don't keep (see extras.py). Display/analysis only.
+    extras: dict[str, Any] | None = None
 
 
 class Assessment(BaseModel):
@@ -128,6 +133,11 @@ class Job(JobSummary):
     salary_max: float | None = None
     salary_currency: str | None = None
     salary_evidence: str | None = None
+    # Every range of a multi-range posting ({label, low, high, text}); salary_min/max span them all.
+    salary_tiers: list[dict[str, Any]] | None = None
+    application_deadline: datetime | None = None
+    # `{"listing": {...}, "detail": {...}}`; persisted in jobs.extras, never dumped into archives.
+    extras: dict[str, Any] | None = Field(default=None, exclude=True)
     first_seen_at: datetime = Field(default_factory=utcnow)
     last_seen_at: datetime = Field(default_factory=utcnow)
     content_hash: str | None = None

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class BackgroundConfig(BaseModel):
@@ -97,11 +98,66 @@ class PipelineConfig(BaseModel):
     )
 
 
+class LevelRule(BaseModel):
+    """Per-source job-level rule for `DreamConfig.levels`: `pattern` (one capture group, the level
+    number) is searched in the posting text; the job qualifies when the highest level found is
+    >= `min`. Only for sources whose postings actually state a level (Ford: a salary link ending
+    in /LL6); a source with no stated level can't be given a rule."""
+
+    pattern: str
+    min: int = Field(ge=1)
+    label: str = "L"
+    # Optional extra condition: the level only counts when the job also states a USD salary whose top
+    # is >= this (e.g. Ford's GSR 8 -- a mid grade -- only when the range reaches your floor).
+    min_salary_usd: float | None = Field(default=None, gt=0)
+
+    @field_validator("pattern")
+    @classmethod
+    def _one_group(cls, value: str) -> str:
+        compiled = re.compile(value)
+        if compiled.groups != 1:
+            raise ValueError("pattern must have exactly one capture group (the level number)")
+        return value
+
+
+class DreamConfig(BaseModel):
+    """Criteria for the radar's display-only "Dream" tag/filter (`dream.py`). A job is a dream job
+    when ANY rule matches. All empty/unset (the default) means the feature is off and the radar
+    renders exactly as before."""
+
+    companies: list[str] = Field(default_factory=list)
+    title_terms: list[str] = Field(default_factory=list)
+    # Weaker title terms (e.g. "senior"): too common to call a job "dream" on their own, so a job
+    # matching only these gets the lighter "Dream-ish" tier. Any strong rule outranks them.
+    weak_title_terms: list[str] = Field(default_factory=list)
+    # Phrases that cancel the *title* rules for a job (e.g. "project manager" so a broad "manager"
+    # term doesn't tag every Project/Product Manager). Company and salary rules are unaffected.
+    title_exclusions: list[str] = Field(default_factory=list)
+    # {source_key: LevelRule}, e.g. Ford's LL6+; the top of a stated range counts (LL5-LL6 -> LL6).
+    # A source may have several schemes (Ford: LL and GSR), so each value is a list of rules.
+    levels: dict[str, list[LevelRule]] = Field(default_factory=dict)
+
+    @field_validator("levels", mode="before")
+    @classmethod
+    def _levels_accept_a_single_rule(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {k: (v if isinstance(v, list) else [v]) for k, v in value.items()}
+        return value
+    min_salary_usd: float | None = Field(default=None, gt=0)
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.companies or self.title_terms or self.weak_title_terms or self.levels or self.min_salary_usd)
+
+
 class RadarConfig(BaseModel):
     """Look of the generated HTML pages. `auto` is the plain light/dark page; the forest themes
     are opt-in (docs/superpowers/specs/2026-10-03-forest-offer-theme-design.md)."""
 
     theme: Literal["auto", "forest", "forest-dawn"] = "auto"
+    dream: DreamConfig = DreamConfig()
+    # A posting's "apply before" date within this many days is flagged "closing soon" on the radar.
+    deadline_soon_days: int = Field(default=14, ge=1)
 
 
 class Settings(BaseModel):

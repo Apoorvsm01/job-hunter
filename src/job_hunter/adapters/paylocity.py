@@ -6,6 +6,7 @@ from urllib.parse import urljoin
 
 from selectolax.parser import HTMLParser
 
+from ..extras import compact_extras
 from ..models import JobDetail, JobSummary
 from ..normalizer import normalize_text, parse_flexible_date, stringify
 from .base import JobAdapter, SchemaError
@@ -123,4 +124,17 @@ class PaylocityAdapter(JobAdapter):
         job_type_html = _sibling_content_html(tree, "Job Type")
         if job_type_html:
             employment_type = normalize_text(HTMLParser(job_type_html).text()) or None
-        return JobDetail(description=description, employment_type=employment_type)
+        # Every other labelled section on the page (header text -> content text).
+        sections = {}
+        for header in tree.css("div.job-listing-header"):
+            label = normalize_text(header.text())
+            node = header.next
+            while node is not None and node.tag == "-text":
+                node = node.next
+            if label and label not in ("Description", "Requirements") and node is not None:
+                sections[label] = normalize_text(node.text())
+        return JobDetail(
+            description=description,
+            employment_type=employment_type,
+            extras=compact_extras(sections) or None,
+        )

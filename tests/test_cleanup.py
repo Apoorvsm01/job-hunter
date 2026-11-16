@@ -184,6 +184,14 @@ def test_scan_reports_ignores_files_outside_known_directories_by_construction(tm
 # --- run_cleanup: end-to-end, dry-run vs --apply, jobs + reports together ---
 
 
+@pytest.fixture(autouse=True)
+def _isolated_lock_dir(tmp_path, monkeypatch):
+    """`run_cleanup(apply=True)` and `run_lock(...)` keep their lock files under the working
+    directory's `data/locks`. Without this, these tests wrote into the real project's lock
+    directory and failed with `RunLockHeld` whenever a real `job-hunter pipeline` was running."""
+    monkeypatch.chdir(tmp_path)
+
+
 def _settings(tmp_path, **retention_overrides) -> Settings:
     settings = Settings(database_path=tmp_path / "jobs.sqlite3")
     for key, value in retention_overrides.items():

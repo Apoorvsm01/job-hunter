@@ -96,6 +96,28 @@ def _migrate_v5_add_nonzero_job_count_baseline(connection: sqlite3.Connection) -
     )
 
 
+def _migrate_v6_add_application_deadline(connection: sqlite3.Connection) -> None:
+    """`jobs.application_deadline`: the posting's "apply before" instant when the source states
+    one (display-only; see `models.JobDetail.application_deadline`)."""
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(jobs)")}
+    if "application_deadline" not in columns:
+        connection.execute("ALTER TABLE jobs ADD COLUMN application_deadline TEXT")
+
+
+def _migrate_v7_add_extras(connection: sqlite3.Connection) -> None:
+    """`jobs.extras`: JSON of the listing/detail fields the typed columns don't keep (extras.py)."""
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(jobs)")}
+    if "extras" not in columns:
+        connection.execute("ALTER TABLE jobs ADD COLUMN extras TEXT")
+
+
+def _migrate_v8_add_salary_tiers(connection: sqlite3.Connection) -> None:
+    """`jobs.salary_tiers`: JSON list of every range in a multi-range posting (salary.py)."""
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(jobs)")}
+    if "salary_tiers" not in columns:
+        connection.execute("ALTER TABLE jobs ADD COLUMN salary_tiers TEXT")
+
+
 #: Ordered, 1-indexed migration steps — entry `N` (1-based) upgrades a database from schema
 #: version `N-1` to version `N`. Tracked via SQLite's own built-in `PRAGMA user_version` integer
 #: (docs/agent-runtime-audit.md's "no explicit schema-version marker" finding) rather than a
@@ -113,6 +135,9 @@ _MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
     _migrate_v3_create_feedback_tombstones,
     _migrate_v4_create_application_tables,
     _migrate_v5_add_nonzero_job_count_baseline,
+    _migrate_v6_add_application_deadline,
+    _migrate_v7_add_extras,
+    _migrate_v8_add_salary_tiers,
 ]
 
 
@@ -296,6 +321,9 @@ class Storage:
             "salary_max": job.salary_max,
             "salary_currency": job.salary_currency,
             "salary_evidence": job.salary_evidence,
+            "salary_tiers": json.dumps(job.salary_tiers, ensure_ascii=False) if job.salary_tiers else None,
+            "application_deadline": job.application_deadline.isoformat() if job.application_deadline else None,
+            "extras": json.dumps(job.extras, ensure_ascii=False, sort_keys=True) if job.extras else None,
             "content_hash": job.content_hash,
             "first_seen_at": job.first_seen_at.isoformat(),
             "last_seen_at": job.last_seen_at.isoformat(),
@@ -350,20 +378,29 @@ class Storage:
         before salary_evidence existed, or picks up a salary.py pattern improvement,
         with no network involved."""
         rows = self.connection.execute(
-            "SELECT source_key, job_id, description, salary_evidence FROM jobs"
+            "SELECT source_key, job_id, description, salary_evidence, salary_min, salary_max, salary_tiers FROM jobs"
         ).fetchall()
         changed = 0
         for row in rows:
             decision = evaluate_salary(row["description"])
-            if decision.evidence != row["salary_evidence"]:
+            tiers = (
+                json.dumps([t.as_dict() for t in decision.tiers], ensure_ascii=False) if decision.tiers else None
+            )
+            if (
+                decision.evidence != row["salary_evidence"]
+                or decision.min_value != row["salary_min"]
+                or decision.max_value != row["salary_max"]
+                or tiers != row["salary_tiers"]
+            ):
                 self.connection.execute(
-                    "UPDATE jobs SET salary_min=?, salary_max=?, salary_currency=?, salary_evidence=? "
+                    "UPDATE jobs SET salary_min=?, salary_max=?, salary_currency=?, salary_evidence=?, salary_tiers=? "
                     "WHERE source_key=? AND job_id=?",
                     (
                         decision.min_value,
                         decision.max_value,
                         "USD" if decision.evidence else None,
                         decision.evidence,
+                        tiers,
                         row["source_key"],
                         row["job_id"],
                     ),

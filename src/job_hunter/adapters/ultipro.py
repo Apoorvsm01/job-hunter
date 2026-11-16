@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from ..extras import compact_extras
 from ..models import JobDetail, JobSummary
 from ..normalizer import normalize_text, parse_flexible_date, stringify
 from .base import JobAdapter, SchemaError
@@ -129,4 +130,7 @@ class UltiProAdapter(JobAdapter):
         except json.JSONDecodeError as exc:
             raise SchemaError("UltiPro CandidateOpportunityDetail is not valid JSON") from exc
         description = data.get("Description") if isinstance(data, dict) else None
-        return JobDetail(description=description or None)
+        return JobDetail(
+            description=description or None,
+            extras=compact_extras(data, skip_keys=("Description",)) or None if isinstance(data, dict) else None,
+        )

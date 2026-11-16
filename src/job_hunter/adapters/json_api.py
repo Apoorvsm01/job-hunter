@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from urllib.parse import urljoin
 
+from ..extras import compact_extras, description_keys
 from ..location import detect_arrangement
 from ..models import JobDetail, JobSummary, WorkArrangement
 from ..normalizer import fallback_job_id, parse_flexible_date, stringify
@@ -106,7 +107,16 @@ class ConfigurableJsonAdapter(JobAdapter):
         response = await self.request("GET", api_url)
         payload = response.json()
         description = _concat_description(payload, description_path)
-        return JobDetail(description=self.augment_description(payload, description))
+        deadline_path = cfg.get("detail_deadline_path")
+        department_path = cfg.get("detail_department_path")
+        return JobDetail(
+            description=self.augment_description(payload, description),
+            department=stringify(nested(payload, department_path)) if department_path else None,
+            application_deadline=(
+                parse_flexible_date(nested(payload, deadline_path)) if deadline_path else None
+            ),
+            extras=compact_extras(payload, skip_keys=description_keys(cfg)) or None,
+        )
 
     def augment_description(self, payload: dict, description: str | None) -> str | None:
         """Hook for a platform that keeps a fact (e.g. pay) in structured fields outside the

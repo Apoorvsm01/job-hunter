@@ -18,6 +18,13 @@ carries no "$" at all, which is why it's optional on that side only — and Torc
 Greenhouse-templated "$177,300 — $212,800 USD") is already two-sided, so requiring a
 second number costs no real recall while ruling out that whole class of false positive.
 
+Multi-range postings (~24% of postings with pay: Nvidia per Level, Microsoft/Intuitive per
+region, Stryker per locality tier, Uber/Rivian per city) state several ranges in one passage.
+Ranges within `_GROUP_WINDOW` characters of each other and of the same kind (both hourly or both
+annual) are grouped: `min_value`/`max_value` are the smallest low and largest high across them
+("for reference"), `evidence` is that overall span, and every range is kept in `tiers` with its
+own wording ("168,000 USD - 264,500 USD for Level 4") so the radar can show each Level/region.
+
 One more real trap found the same way: dozens of Caterpillar/Nissan Workday postings for
 hourly/union roles carry an unfilled compensation-template field that renders as a
 literal "$0.00 - $0.00" — not a real range, and never surfaced as one."""
@@ -59,6 +66,24 @@ _RANGE = re.compile(
     re.I,
 )
 _NUMBER = re.compile(rf"({_NUM})(\s?[kK]\b)?")
+# Ranges this close (characters, after tag stripping) belong to the same pay passage.
+_GROUP_WINDOW = 300
+_TIER_LABEL = re.compile(r"\b(Level|Grade|Band|Tier|Region|Zone)\s*([A-Za-z]?\d+)", re.I)
+_TIER_TAIL = 60
+
+
+@dataclass(frozen=True)
+class SalaryTier:
+    """One range of a multi-range posting. `label` is a Level/Grade/Band/Tier/Region/Zone token
+    found in its own wording, if any; `text` is that wording, trimmed of dangling connectors."""
+
+    low: float
+    high: float
+    text: str
+    label: str | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        return {"label": self.label, "low": self.low, "high": self.high, "text": self.text}
 
 
 @dataclass(frozen=True)
@@ -66,6 +91,27 @@ class SalaryDecision:
     evidence: str | None = None
     min_value: float | None = None
     max_value: float | None = None
+    tiers: tuple[SalaryTier, ...] = ()
+
+
+def _money(value: float) -> str:
+    return f"${value:,.0f}" if value == int(value) else f"${value:,.2f}"
+
+
+def _tier_text(text: str, start: int, end: int, next_start: int | None) -> str:
+    """The range's own wording plus a short tail ("... for Level 4"), cut at the next range or the
+    end of the sentence, with dangling "and"/commas removed."""
+    stop = min(end + _TIER_TAIL, next_start if next_start is not None else len(text))
+    snippet = text[start:stop]
+    sentence_end = re.search(r"(?<=[A-Za-z0-9)])\.(?:\s|$)|;|\n", snippet[end - start :])
+    if sentence_end:
+        snippet = snippet[: end - start + sentence_end.start()]
+    return re.sub(r"(?:[,;:\s]|\band\b|\bor\b)+$", "", snippet, flags=re.I).strip()
+
+
+def _tier_label(snippet: str) -> str | None:
+    match = _TIER_LABEL.search(snippet)
+    return f"{match.group(1).title()} {match.group(2).upper()}" if match else None
 
 
 def _value(number: str, k: str | None) -> float:
@@ -84,6 +130,7 @@ def evaluate_salary(description: str | None) -> SalaryDecision:
     text = " ".join(_TAG.sub(" ", _INVISIBLE.sub("", html.unescape(description or ""))).split())
     # First *valid* range wins: a match that parses to a non-range (an unfilled
     # "$0.00 - $0.00", or a high below the low) is skipped, not allowed to hide a real one.
+    found: list[tuple[re.Match[str], float, float]] = []
     for match in _RANGE.finditer(text):
         numbers = _NUMBER.findall(match.group(0))
         if len(numbers) < 2:
@@ -94,7 +141,6 @@ def evaluate_salary(description: str | None) -> SalaryDecision:
             high *= 1000  # "$130k-180" means 130k to 180k
         if low == 0 and high == 0:
             continue
-        evidence = " ".join(match.group(0).split())
         if low > high:
             # A typo'd posting ("$130,000- $145,00", "$100,0000 - $130,000"): real pay text
             # worth showing as evidence, but the parsed numbers are untrustworthy, so
@@ -102,6 +148,24 @@ def evaluate_salary(description: str | None) -> SalaryDecision:
             # likely not pay at all, so skip it.
             if numbers[0][1] or numbers[1][1]:
                 continue
-            return SalaryDecision(evidence)
-        return SalaryDecision(evidence, low, high)
-    return SalaryDecision()
+            if not found:
+                return SalaryDecision(" ".join(match.group(0).split()))
+            continue  # a later typo'd range never overrides or joins a good first one
+        if found:
+            first_low = found[0][1]
+            if match.start() - found[-1][0].end() > _GROUP_WINDOW or (first_low < 1000) != (low < 1000):
+                break  # a different passage, or a different kind of figure (hourly vs annual)
+        found.append((match, low, high))
+    if not found:
+        return SalaryDecision()
+    if len(found) == 1:
+        match, low, high = found[0]
+        return SalaryDecision(" ".join(match.group(0).split()), low, high)
+    tiers = []
+    for index, (match, low, high) in enumerate(found):
+        next_start = found[index + 1][0].start() if index + 1 < len(found) else None
+        wording = _tier_text(text, match.start(), match.end(), next_start)
+        tiers.append(SalaryTier(low, high, wording, _tier_label(wording[match.end() - match.start() :])))
+    lowest = min(t.low for t in tiers)
+    highest = max(t.high for t in tiers)
+    return SalaryDecision(f"{_money(lowest)} - {_money(highest)}", lowest, highest, tuple(tiers))

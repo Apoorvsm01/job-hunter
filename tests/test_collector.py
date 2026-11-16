@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
@@ -514,3 +515,120 @@ async def test_listing_work_arrangement_survives_a_detail_record_that_has_none(t
         await Collector(settings, [_fake_company()], CandidateProfile()).search(include_seen=True)
     with Storage(settings.database_path) as storage:
         assert storage.get_job("fake", "j1")["work_arrangement"] == "hybrid"
+
+
+class _DeadlineAdapter(_ArrangementAdapter):
+    deadline = datetime(2027, 1, 31, tzinfo=UTC)
+    detail_calls = 0
+
+    async def fetch_detail(self, summary: JobSummary) -> JobDetail:
+        _DeadlineAdapter.detail_calls += 1
+        return JobDetail(description="A description", application_deadline=_DeadlineAdapter.deadline)
+
+
+@pytest.mark.asyncio
+async def test_application_deadline_is_stored_and_kept_when_no_detail_is_refetched(tmp_path):
+    """The deadline comes only from a detail fetch. A later run that skips the detail fetch (job
+    already stored with a description) must keep the stored deadline, not blank it."""
+    settings = Settings(database_path=tmp_path / "jobs.sqlite3", collection=CollectionConfig())
+    _DeadlineAdapter.detail_calls = 0
+    with patch("job_hunter.collector.adapter_class", return_value=_DeadlineAdapter):
+        await Collector(settings, [_fake_company()], CandidateProfile()).search(include_seen=True)
+        assert _DeadlineAdapter.detail_calls == 1
+        await Collector(settings, [_fake_company()], CandidateProfile()).search(include_seen=True)
+        assert _DeadlineAdapter.detail_calls == 1  # second run did not refetch the detail
+    with Storage(settings.database_path) as storage:
+        assert storage.get_job("fake", "j1")["application_deadline"] == _DeadlineAdapter.deadline.isoformat()
+
+
+class _ExtrasAdapter(_ArrangementAdapter):
+    detail_calls = 0
+
+    async def fetch_summaries(self) -> list[JobSummary]:
+        jobs = await super().fetch_summaries()
+        jobs[0].raw = {"JobFamily": "Eng", "description": "listing text", "Nothing": None}
+        return jobs
+
+    async def fetch_detail(self, summary: JobSummary) -> JobDetail:
+        _ExtrasAdapter.detail_calls += 1
+        return JobDetail(description="A description", extras={"Category": "PD Operations and Quality"})
+
+
+@pytest.mark.asyncio
+async def test_extras_capture_listing_each_run_and_keep_the_stored_detail_part(tmp_path):
+    settings = Settings(database_path=tmp_path / "jobs.sqlite3", collection=CollectionConfig())
+    _ExtrasAdapter.detail_calls = 0
+    expected = {"listing": {"JobFamily": "Eng"}, "detail": {"Category": "PD Operations and Quality"}}
+    with patch("job_hunter.collector.adapter_class", return_value=_ExtrasAdapter):
+        await Collector(settings, [_fake_company()], CandidateProfile()).search(include_seen=True)
+        await Collector(settings, [_fake_company()], CandidateProfile()).search(include_seen=True)
+    assert _ExtrasAdapter.detail_calls == 1  # second run skipped the detail fetch...
+    with Storage(settings.database_path) as storage:
+        assert json.loads(storage.get_job("fake", "j1")["extras"]) == expected  # ...and kept its extras
+
+
+class _DepartmentAdapter(_ArrangementAdapter):
+    """Detail-only department (Ford's Category): the listing carries none."""
+
+    fill = True
+    calls = 0
+
+    async def fetch_summaries(self) -> list[JobSummary]:
+        now = datetime.now(UTC)
+        return [
+            JobSummary(source_key="fake", source_platform="fake", company="Acme", job_id=f"j{i}",
+                       title="Role", url=f"https://example.com/j{i}", country="US", posted_at=now)
+            for i in range(12)
+        ]
+
+    async def fetch_detail(self, summary: JobSummary) -> JobDetail:
+        _DepartmentAdapter.calls += 1
+        return JobDetail(description="d", department="Manufacturing" if _DepartmentAdapter.fill else None)
+
+
+def _dept_company():
+    return CompanyConfig(
+        key="fake", company="Acme", adapter="fake", config={"expect_detail_fields": {"department": 0.5}}
+    )
+
+
+@pytest.mark.asyncio
+async def test_detail_department_is_stored_and_survives_a_run_that_skips_the_detail(tmp_path):
+    settings = Settings(database_path=tmp_path / "jobs.sqlite3", collection=CollectionConfig())
+    _DepartmentAdapter.fill = True
+    with patch("job_hunter.collector.adapter_class", return_value=_DepartmentAdapter):
+        await Collector(settings, [_dept_company()], CandidateProfile()).search(include_seen=True)
+        await Collector(settings, [_dept_company()], CandidateProfile()).search(include_seen=True)  # no detail
+        with Storage(settings.database_path) as storage:
+            assert storage.get_job("fake", "j0")["department"] == "Manufacturing"
+            [row] = storage.health_rows()
+            assert row["last_status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_missing_expected_detail_field_raises_a_warning_not_a_failure(tmp_path):
+    settings = Settings(database_path=tmp_path / "jobs.sqlite3", collection=CollectionConfig())
+    _DepartmentAdapter.fill = False  # e.g. the source renamed the field
+    with patch("job_hunter.collector.adapter_class", return_value=_DepartmentAdapter):
+        result = await Collector(settings, [_dept_company()], CandidateProfile()).search(include_seen=True)
+    [health] = result.source_health
+    assert health.status.value == "warning" and "department filled for 0/12" in health.message
+    with Storage(settings.database_path) as storage:
+        assert storage.get_job("fake", "j0") is not None  # jobs are kept
+
+
+class _ListingDeptAdapter(_DepartmentAdapter):
+    fill = False
+
+    async def fetch_detail(self, summary: JobSummary) -> JobDetail:
+        return JobDetail(description="d")
+
+
+@pytest.mark.asyncio
+async def test_missing_expected_listing_field_raises_a_warning(tmp_path):
+    settings = Settings(database_path=tmp_path / "jobs.sqlite3", collection=CollectionConfig())
+    company = CompanyConfig(key="fake", company="Acme", adapter="fake", config={"expect_listing_fields": {"department": 0.7}})
+    with patch("job_hunter.collector.adapter_class", return_value=_ListingDeptAdapter):
+        result = await Collector(settings, [company], CandidateProfile()).search(include_seen=True)
+    [health] = result.source_health
+    assert health.status.value == "warning" and "department filled for 0/12 listing items" in health.message

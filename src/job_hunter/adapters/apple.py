@@ -5,6 +5,7 @@ import json
 import re
 from urllib.parse import parse_qsl, urljoin, urlsplit, urlunsplit
 
+from ..extras import compact_extras
 from ..models import JobDetail, JobSummary
 from ..normalizer import normalize_text, parse_flexible_date, stringify
 from ..prefilter import is_recent
@@ -151,4 +152,5 @@ class AppleAdapter(JobAdapter):
             state=state,
             country=country,
             posted_at=parse_flexible_date(job.get("postDateInGMT")),
+            extras=compact_extras(job, skip_keys=("description", "jobSummary")) or None,
         )

@@ -192,3 +192,18 @@ def test_title_only_domain_terms_still_gate_a_relevant_generic_title():
         job(title="Integrated Verification and Validation Technical Program Manager (GR 31)"),
         profile,
     )
+
+
+def test_a_term_cannot_straddle_the_title_department_boundary():
+    """Regression: title "...Air Systems" + department "Engineering" joined by a space read as
+    "air systems engineering" and matched the term "systems engineering" though neither field has it."""
+    profile = CandidateProfile(target_domains=["systems engineering"])
+    straddle = job(title="Design Engineer - Air Systems", department="Engineering")
+    assert not passes_prefilter(straddle, profile)
+    assert evaluate_prefilter(straddle, profile).rule == PrefilterRule.NO_POSITIVE_MATCH
+    # a genuine match in either field alone still passes
+    assert passes_prefilter(job(title="Senior Systems Engineering Lead", department="Eng"), profile)
+    assert passes_prefilter(job(title="Staff Engineer - AV Sensing", department="Systems Engineering"), profile)
+    # and soft excludes are scoped the same way ("air market" + "ing" must not read as "marketing")
+    soft = CandidateProfile(target_domains=["engineer"], soft_exclude_terms=["marketing"])
+    assert passes_prefilter(job(title="Engineer, Test Market", department="ing Group"), soft)

@@ -82,7 +82,7 @@ def evaluate_prefilter(
     if matched_exclude is not None:
         return PrefilterDecision(passes=False, rule=PrefilterRule.EXCLUDE_TERMS, term=matched_exclude)
 
-    gate_text = f"{job.title} {job.department or ''}".lower()
+    gate_text = gate_text_for(job)
     positive = keywords if keywords else [*profile.target_title_terms, *profile.target_domains]
     matched_positive = next((t for t in positive if t.lower() in gate_text), None) if positive else None
     if positive and matched_positive is None:
@@ -120,6 +120,15 @@ def evaluate_prefilter(
         )
 
     return PrefilterDecision(passes=True, rule=PrefilterRule.POSITIVE_MATCH, term=matched_positive)
+
+
+def gate_text_for(job: Job) -> str:
+    """The text the positive gate and soft excludes match against: title + department, joined with
+    a separator no term contains. A plain space let a term straddle the boundary: title "...Air
+    Systems" + department "Engineering" read as "air systems engineering" and matched the term
+    "systems engineering" though neither field contains it (measured: 3 of ~4,000 departmented jobs,
+    and every Engineering-family Workday job once departments were mapped)."""
+    return f"{job.title} | {job.department or ''}".lower()
 
 
 def passes_prefilter(

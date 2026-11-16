@@ -130,7 +130,11 @@ optional `payload`/`params`; `items_path` (dot-separated path to the posting lis
 (maps normalized names — `id`, `title`, `url`, `location`, `city`, `state`, `country`,
 `department`, `employment_type`, `posted_at` — to response paths); `detail_base_url`,
 `listing_description_path`, or `detail_description_path`; Oracle HCM's `paginate: true` +
-`total_path` (§5.1); the opt-in `public_url_template` (§5.4).
+`total_path` (§5.1); the opt-in `public_url_template` (§5.4); and the detail-record mappings below
+(see §3.5 "Field mappings", the place to look when a mapped field stops arriving):
+`detail_deadline_path` (→ `application_deadline`), `detail_department_path` (→ `department`),
+`expect_detail_fields` / `expect_listing_fields` / `expect_detail_min_sample` (coverage warning), and Workday's
+`department_facet` (§3.5).
 
 HTML adapters accept: `list_url`, `card_selector`, `link_selector`, `title_selector`,
 `location_selector`, `id_attribute`, `next_selector`, `page_parameter`/`page_size` (row-offset
@@ -141,6 +145,59 @@ pagination) or `page_number_parameter` (1-indexed page-number pagination), `post
 
 Use `scripts/endpoint_probe.py` (or curl) during development to inspect a candidate endpoint
 before writing config for it — never hand-invent an endpoint shape (§5.23).
+
+### 3.5 Field mappings: what each source's payload feeds, and how a break shows up
+
+Each adapter maps a few fields of its source's response onto the typed `Job` fields; everything
+else is kept in `jobs.extras` (`extras.py`: `{"listing": ..., "detail": ...}`, empties and
+description text dropped, strings > 2000 chars dropped with the key named in `_omitted_long`, ~20KB
+cap) so a later mapping is a local read, not a re-fetch. Mappings that are *not* a plain listing
+field, and where the data comes from:
+
+| Source | Typed field | Source field | Where | Notes |
+|---|---|---|---|---|
+| Ford (Oracle HCM) | `department` | `Category` (a coarse function, e.g. "PD Operations and Quality", "Manufacturing", "Enterprise Technology"; ~83% filled) | **detail** call only (`detail_department_path`) | The listing's `JobFunction`/`Category`/`JobFamily`/`ManagerLevel` are null on every item. `JobFunction` (finer, e.g. "Industrial and Occupational Ergonomics") is in `extras`. Feeds `prefilter` (positive gate and `soft_exclude_terms` read title + department), so it can change which jobs pass. |
+| GM (Workday native) | `department` | listing facet `jobFamily` (55 values, e.g. "Systems Engineering", "Software Engineering") | **listing**, one extra pass (`department_facet`, `WorkdayAdapter._apply_department_facet`) | Workday never states a family on the job, only as a facet, so each facet value is queried once (~69 extra requests per GM run). Opt-in per source. Measured on the real prefilter: GM +18 gains / 0 losses; Nvidia +25/-16 (a family named "Program Manager" admits HR/Real Estate roles) and Caterpillar/Valeo (no genuine gain) are deliberately left off. A failed facet pass never fails the listing: departments stay empty and `expect_listing_fields: {department: 0.7}` raises a warning. |
+| Ford (Oracle HCM) | `application_deadline` | `ExternalPostedEndDate` | **detail** call only (`detail_deadline_path`) | Midnight UTC, displayed in the viewer's timezone ("01/30/2027 7:00 PM" Eastern is 01/31 00:00Z). Display-only. |
+
+How the collector handles detail-only fields: a field set by a fresh detail fetch is **kept from the
+stored row** when a run skips the detail fetch (`collector.py`: department falls back to
+`prior["department"]`, the deadline to `prior["application_deadline"]`), so only a *new or
+refreshed* job ever changes it. Existing jobs get a value the first time their detail is refetched:
+`job-hunter search --companies ford --refresh-details`.
+
+**Source field audit (2026-11-15, from stored text plus one live read per source).** What each source states
+for deadline / level / department, and what is wired (W) or still a suggestion (S):
+
+| Source | Deadline | Level | Department |
+|---|---|---|---|
+| Ford (Oracle HCM) | W: detail `ExternalPostedEndDate` | W: `fordcareers.co/LL<n>` (~20%), `salary grade <n>` (~60%) in text | W: detail `Category` |
+| Caterpillar, Nvidia, GM, Valeo (Workday native) | W: detail `endDate` (Valeo, Caterpillar carry one; the Nvidia job probed had none) | none in payload. Nvidia **states Level in its pay text**, `... USD for Level 4, and ... USD for Level 5` (1,015 of 2,298 jobs; top level: L5 472, L4 301, L6 107): rule-able (S, needs your threshold). GM: `This Level N role` (~13 jobs). Caterpillar: none ("Salary Grade 2/3" is training boilerplate; 54 titles end I/II/III). | none per job, but the listing has **facets** (`jobFamilyGroup`/`jobFamily`: Caterpillar 18, Nvidia 15, GM 22/55, Valeo 19). A per-facet query would map job to family: (S) |
+| Honda (Phenom) | none found | `Career Level: N` in text (36 of 430), I/II titles | listing `department` (already mapped, 396 of 430) |
+| PACCAR (SuccessFactors RMK) | none found | none | none (SuccessFactors page has no field) |
+| Stellantis (ADP) | none | none | none: `organizationalUnits`, `workLocations`, `postingLocations` are empty on all 472 items |
+
+Status of the audit's suggestions: (1) Workday family facets to department: **done for GM only** (table above; the measurement is why the rest are off); (2) Nvidia/GM level rules: **no rule yet** (needs thresholds); Nvidia's Levels are stored as `salary_tiers`
+labels ("Level 4", "Level 5") and in the description; (3) Workday `additionalLocations` (Nvidia lists e.g.
+`["US, TX, Austin", "US, Remote"]` while the listing says "4 Locations") is captured in `extras` from the next run, so a
+later check can tell whether a non-US *primary* location is wrongly hiding US-eligible jobs (nothing changes until
+then); (4) **done**: `salary.py` groups every range in one pay passage (<= 300 chars apart, same hourly/annual kind;
+~24% of postings with pay, e.g. Nvidia per Level, Microsoft/Intuitive per region): `salary_min`/`salary_max` are the
+smallest low and largest high, `salary_evidence` the overall span ("$184,000 - $356,500"), `salary_tiers` keeps each
+range in its own wording, and the radar shows the span in the row (hover for the tiers) and a "Pay ranges" list in the
+expanded dropdown. `job-hunter reevaluate-salary` backfills stored jobs locally from their descriptions.
+
+**Knowing when a mapping breaks.** A company can declare `expect_detail_fields: {department: 0.5}`
+(minimum filled fraction, per `JobDetail` field). After each run's detail fetches,
+`health.detect_field_coverage` compares the fields' fill rate over the details fetched *this run*
+(skipped when fewer than `expect_detail_min_sample`, default 10, were fetched, so a quiet day proves
+nothing) and, on an otherwise clean run, downgrades the source to a **`warning`** with a message like
+`Detail field coverage dropped: department filled for 3/120 fetched details (expected >= 50%)`.
+Jobs are kept; as with a count-drop warning, `mark_missing` and the count baseline are skipped for
+that run. It shows in `job-hunter source-status`, `source-test`, and the radar's Collection Issues.
+To adjust: re-inspect the live payload (`scripts/endpoint_probe.py` / curl the detail URL), fix
+`detail_department_path`, then refetch. If the field is legitimately sparse, lower the threshold
+rather than removing the check. Ford's threshold is 0.5 against ~83% observed.
 
 ---
 
@@ -1147,7 +1204,9 @@ rows forever. `--output-dir` and `--no-state` make a run side-effect free.
 ### 8.1 `jobs` — one row per `(source_key, job_id)`
 
 Full normalized record (title, location fields, `us_eligible`, `location_confidence/evidence`,
-`visa_sponsorship`/`sponsorship_evidence`, department, description, salary fields, `content_hash`,
+`visa_sponsorship`/`sponsorship_evidence`, department, description, salary fields,
+`application_deadline` (migration v6), `extras` (migration v7, JSON), `salary_tiers` (migration v8, JSON:
+every range of a multi-range posting, each `{label, low, high, text}`), `content_hash`,
 `first_seen_at`, `last_seen_at`, `status` [`active`/`closed`], `missing_count`). Upserted with
 `is_new`/`is_changed` computed from the prior row's `content_hash`. A job is marked `closed` after
 3 consecutive runs missing from a healthy source's listing (`mark_missing`); it stays `active`

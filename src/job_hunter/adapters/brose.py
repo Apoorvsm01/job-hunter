@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from ..extras import compact_extras
 from ..models import JobDetail, JobSummary
 from ..normalizer import extract_job_posting_ld, stringify
 from .base import SchemaError
@@ -54,4 +55,5 @@ class BroseAdapter(ConfigurableJsonAdapter):
             state=stringify(address.get("addressRegion")),
             country=stringify(address.get("addressCountry")),
             posted_at=_parse_month_first_date(posting.get("datePosted")),
+            extras=compact_extras(posting, skip_keys=(*_BODY_FIELDS, "description")) or None,
         )
