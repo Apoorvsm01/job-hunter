@@ -77,6 +77,10 @@ Apply a strict, evidence-based standard:
    keyword overlap.
 7. Assess whether the candidate's seniority and scope match the role. Penalize both substantial
    underqualification and material overqualification.
+   Gap sizing: when domain_fit is "core" and the resume evidences the role's technical work,
+   a gap in people-management, organisation-wide, strategy or governance scope costs a few points
+   (about 3 to 5 each), not a band. Only a hard requirement the resume clearly does not meet is
+   a blocker; do not turn a "not evidenced" scope item into one.
 8. Give credit for transferable experience only when the resume contains concrete evidence that
    reasonably maps to the job requirement. State that mapping explicitly.
 9. Do not award points for location — U.S. eligibility has already been established upstream.

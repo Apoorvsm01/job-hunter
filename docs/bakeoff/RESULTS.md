@@ -44,3 +44,11 @@ Run 2026-11-16, review prompt `271c680-dirty` (job-reviewer 1.4.0), context 3276
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | 2026-11-16-T-seniority-nocap | google/gemma-4-31b-qat | 18.9 | off | on | 1.0 | 0/60 | 24/34 | 18/34 | 16/34 | 1/34 | 11.1 | 19.1 |
 
+## Apple M5 Max, 128 GB
+
+Run 2026-11-16, review prompt `ada83df-dirty` (job-reviewer 1.4.0), context 32768, golden set `814fe2f222` (97 jobs: 34 wanted, 60 tagged irrelevant).
+
+| run | model | size GB | thinking | resume view | AUC | irrelevant ≥70 | wanted ≥70 | wanted ≥75 | wanted ≥80 | wanted called off-domain | secs/job (median) | total min |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 2026-11-16-T-gap-sizing | google/gemma-4-31b-qat | 18.9 | off | on | 0.978 | 0/58 | 26/34 | 21/34 | 17/34 | 1/34 | 11.4 | 19.4 |
+

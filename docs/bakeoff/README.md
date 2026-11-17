@@ -39,6 +39,7 @@ Read the tables in `RESULTS.md`, then these limits:
   and URLs cannot change a verdict and saves tokens and privacy, so that is what to enable; leave `compact_sections` empty unless your
   own bake-off says otherwise. The published row marked `resume view: on` is the condensed variant.
 - **Seniority ceiling removed (job-reviewer 1.4.0):** a level mismatch used to cap a score at 74. With no ceiling and a prompt that treats a lead role in the core domain as a match, Gemma (off) scored AUC 1.000, 0 of 60 irrelevant jobs at 70 or more and 24 of 34 wanted at 70 or more, with 97 of 97 valid answers. Recall did not improve (25-26 of 34 before): the missed jobs score 58-68 because the model itself lists missing people-management or organisation-wide scope as gaps, not because of the ceiling. The row's prompt commit reads `271c680-dirty` (the change was committed after the run).
+- **Gap sizing** (prompt rule: in a core-domain role whose technical work the resume shows, a missing people-management or organisation-wide scope costs about 3-5 points, never a blocker): 26 of 34 wanted at 70 or more (24 before), 21 at 75 or more (18 before), 0 of 58 irrelevant at 70 or more, AUC 0.978, 95 of 97 valid answers. Recall rose by two jobs, within run-to-run noise; AUC fell a little because two answers failed the schema and the model called fewer irrelevant jobs off-domain (53 of 58 against 60 of 60). The missed leadership roles still sit at 58-65.
 - Thinking-on runs that did not finish are listed in `RESULTS.md` without quality numbers.
 
 ## Run it on your machine
