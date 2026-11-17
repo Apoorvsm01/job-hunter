@@ -305,7 +305,6 @@ def test_delete_closed_jobs_cascades_to_assessments_and_feedback(tmp_path):
         storage.connection.execute("UPDATE jobs SET status='closed' WHERE job_id='stale'")
         storage.connection.commit()
         storage.upsert_assessment(make_assessment(job_id="stale"))
-        storage.upsert_job_feedback(make_feedback(source_key="acme", job_id="stale", title="Engineer"))
 
         # A second, unrelated closed-but-recent job must survive untouched.
         storage.upsert_job(make_job(job_id="recent"))
@@ -317,7 +316,7 @@ def test_delete_closed_jobs_cascades_to_assessments_and_feedback(tmp_path):
 
         assert [row["job_id"] for row in deleted["jobs"]] == ["stale"]
         assert [row["job_id"] for row in deleted["assessments"]] == ["stale"]
-        assert [row["job_id"] for row in deleted["job_feedback"]] == ["stale"]
+        assert deleted["job_feedback"] == []
 
         assert storage.get_job("acme", "stale") is None
         assert ("acme", "stale") not in storage.all_assessments()
@@ -712,6 +711,28 @@ def test_feedback_tombstone_reader(tmp_path):
         assert storage.get_feedback_tombstone("apple", "99") == _t(3).isoformat()
 
 
+def test_cleanup_keeps_closed_jobs_you_applied_to_or_labelled(tmp_path):
+    """The posting text of a job with an application row or a feedback label is the evidence
+    later calibration learns from, so a stale closed job like that is not eligible at all."""
+    now = datetime.now(UTC)
+    old = now - timedelta(days=30)
+    with Storage(tmp_path / "jobs.sqlite3") as storage:
+        for job_id in ("applied", "labelled", "plain"):
+            storage.upsert_job(make_job(job_id=job_id, last_seen_at=old))
+        storage.connection.execute("UPDATE jobs SET status='closed'")
+        storage.connection.commit()
+        _apply(storage, 0, {"status": ApplicationStatus.APPLIED}, key=("acme", "applied"))
+        storage.upsert_job_feedback(make_feedback(source_key="acme", job_id="labelled", title="Engineer"))
+
+        cutoff = now - timedelta(days=10)
+        assert [j["job_id"] for j in storage.find_stale_closed_jobs(cutoff)] == ["plain"]
+        storage.delete_closed_jobs(cutoff)
+        assert storage.get_job("acme", "applied") is not None
+        assert storage.get_job("acme", "labelled") is not None
+        assert storage.get_job("acme", "plain") is None
+        assert storage.feedback_map()  # the label survived with its job
+
+
 def test_cleanup_never_touches_applications_or_their_tombstones(tmp_path):
     now = datetime.now(UTC)
     with Storage(tmp_path / "jobs.sqlite3") as storage:
@@ -720,8 +741,11 @@ def test_cleanup_never_touches_applications_or_their_tombstones(tmp_path):
         storage.connection.commit()
         _apply(storage, 0, {"status": ApplicationStatus.APPLIED}, key=("acme", "stale"))
         _apply(storage, 1, {"status": None}, key=("acme", "other"), snapshot=None)
+        storage.upsert_job(make_job(job_id="plain", last_seen_at=now - timedelta(days=30)))
+        storage.connection.execute("UPDATE jobs SET status='closed' WHERE job_id='plain'")
+        storage.connection.commit()
         deleted = storage.delete_closed_jobs(now - timedelta(days=7))
-        assert [j["job_id"] for j in deleted["jobs"]] == ["stale"]
+        assert [j["job_id"] for j in deleted["jobs"]] == ["plain"]  # the applied job is kept
         assert set(deleted) == {"jobs", "assessments", "job_feedback"}  # return shape unchanged
         assert storage.get_application("acme", "stale")["status"] == "applied"
         assert storage.get_application_tombstone("acme", "other") is not None
@@ -841,3 +865,36 @@ def test_salary_tiers_roundtrip_and_reevaluate_salary_backfills_min_max_and_tier
         assert (row["salary_min"], row["salary_max"], row["salary_evidence"]) == (184000.0, 356500.0, "$184,000 - $356,500")
         assert [t["label"] for t in json.loads(row["salary_tiers"])] == ["Level 4", "Level 5"]
         assert storage.reevaluate_salary() == 0  # idempotent
+
+
+def test_assessment_facets_round_trip_and_default_for_legacy_rows(tmp_path):
+    with Storage(tmp_path / "jobs.sqlite3") as storage:
+        storage.upsert_assessment(
+            make_assessment(job_id="new", domain_fit="adjacent", seniority_fit="above", blockers=["clearance"])
+        )
+        storage.upsert_assessment(make_assessment(job_id="legacy"))  # an assessment made before facets
+        new = storage.all_assessments()[("acme", "new")]
+        assert (new.domain_fit, new.seniority_fit, new.blockers) == ("adjacent", "above", ["clearance"])
+        legacy = storage.all_assessments()[("acme", "legacy")]
+        assert (legacy.domain_fit, legacy.seniority_fit, legacy.blockers) == (None, None, [])
+        exported = {r["job_id"]: r for r in storage.export_assessments()}
+        assert exported["new"]["blockers"] == ["clearance"] and exported["legacy"]["domain_fit"] is None
+
+
+def test_v9_migration_adds_assessment_facet_columns_to_an_older_database(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "old.sqlite3"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        "CREATE TABLE assessments (source_key TEXT NOT NULL, job_id TEXT NOT NULL, company TEXT NOT NULL,"
+        " title TEXT NOT NULL, url TEXT NOT NULL, content_hash TEXT, score INTEGER NOT NULL,"
+        " recommended INTEGER NOT NULL, matches TEXT NOT NULL, gaps TEXT NOT NULL, resume_path TEXT,"
+        " assessed_at TEXT NOT NULL, PRIMARY KEY(source_key, job_id));"
+        "INSERT INTO assessments VALUES ('acme','1','Acme','T','u','h',80,1,'[]','[]',NULL,'2026-01-01T00:00:00+00:00');"
+    )
+    conn.commit()
+    conn.close()
+    with Storage(path) as storage:
+        old = storage.all_assessments()[("acme", "1")]
+        assert old.score == 80 and old.domain_fit is None and old.blockers == []

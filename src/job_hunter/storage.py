@@ -7,6 +7,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from .extras import salary_source_text
 from .location import code_appears_in_own_text, evaluate_location, is_ambiguous_state_country_code
 from .models import (
     Application,
@@ -118,6 +119,17 @@ def _migrate_v8_add_salary_tiers(connection: sqlite3.Connection) -> None:
         connection.execute("ALTER TABLE jobs ADD COLUMN salary_tiers TEXT")
 
 
+def _migrate_v9_add_assessment_facets(connection: sqlite3.Connection) -> None:
+    """`assessments.domain_fit`/`seniority_fit`/`blockers`: the review prompt's structured judgments."""
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(assessments)")}
+    if "domain_fit" not in columns:
+        connection.execute("ALTER TABLE assessments ADD COLUMN domain_fit TEXT")
+    if "seniority_fit" not in columns:
+        connection.execute("ALTER TABLE assessments ADD COLUMN seniority_fit TEXT")
+    if "blockers" not in columns:
+        connection.execute("ALTER TABLE assessments ADD COLUMN blockers TEXT")
+
+
 #: Ordered, 1-indexed migration steps — entry `N` (1-based) upgrades a database from schema
 #: version `N-1` to version `N`. Tracked via SQLite's own built-in `PRAGMA user_version` integer
 #: (docs/agent-runtime-audit.md's "no explicit schema-version marker" finding) rather than a
@@ -138,6 +150,7 @@ _MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
     _migrate_v6_add_application_deadline,
     _migrate_v7_add_extras,
     _migrate_v8_add_salary_tiers,
+    _migrate_v9_add_assessment_facets,
 ]
 
 
@@ -378,11 +391,11 @@ class Storage:
         before salary_evidence existed, or picks up a salary.py pattern improvement,
         with no network involved."""
         rows = self.connection.execute(
-            "SELECT source_key, job_id, description, salary_evidence, salary_min, salary_max, salary_tiers FROM jobs"
+            "SELECT source_key, job_id, description, extras, salary_evidence, salary_min, salary_max, salary_tiers FROM jobs"
         ).fetchall()
         changed = 0
         for row in rows:
-            decision = evaluate_salary(row["description"])
+            decision = evaluate_salary(salary_source_text(row["description"], row["extras"]))
             tiers = (
                 json.dumps([t.as_dict() for t in decision.tiers], ensure_ascii=False) if decision.tiers else None
             )
@@ -585,12 +598,15 @@ class Storage:
     def upsert_assessment(self, assessment: Assessment) -> None:
         self.connection.execute(
             """INSERT INTO assessments(source_key, job_id, company, title, url, content_hash,
-               score, recommended, matches, gaps, resume_path, assessed_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               score, recommended, matches, gaps, resume_path, assessed_at,
+               domain_fit, seniority_fit, blockers)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(source_key, job_id) DO UPDATE SET company=excluded.company,
                title=excluded.title, url=excluded.url, content_hash=excluded.content_hash,
                score=excluded.score, recommended=excluded.recommended, matches=excluded.matches,
-               gaps=excluded.gaps, resume_path=excluded.resume_path, assessed_at=excluded.assessed_at""",
+               gaps=excluded.gaps, resume_path=excluded.resume_path, assessed_at=excluded.assessed_at,
+               domain_fit=excluded.domain_fit, seniority_fit=excluded.seniority_fit,
+               blockers=excluded.blockers""",
             (
                 assessment.source_key,
                 assessment.job_id,
@@ -604,6 +620,9 @@ class Storage:
                 json.dumps(assessment.gaps),
                 assessment.resume_path,
                 assessment.assessed_at.isoformat(),
+                assessment.domain_fit,
+                assessment.seniority_fit,
+                json.dumps(assessment.blockers),
             ),
         )
         self.connection.commit()
@@ -621,6 +640,9 @@ class Storage:
             recommended=bool(row["recommended"]),
             matches=json.loads(row["matches"]),
             gaps=json.loads(row["gaps"]),
+            domain_fit=row["domain_fit"],
+            seniority_fit=row["seniority_fit"],
+            blockers=json.loads(row["blockers"] or "[]"),
             resume_path=row["resume_path"],
             assessed_at=row["assessed_at"],
         )
@@ -675,6 +697,7 @@ class Storage:
             item = dict(row)
             item["matches"] = json.loads(item["matches"])
             item["gaps"] = json.loads(item["gaps"])
+            item["blockers"] = json.loads(item.get("blockers") or "[]")
             item["recommended"] = bool(item["recommended"])
             results.append(item)
         return results
@@ -966,15 +989,26 @@ class Storage:
         this job was confirmed present," the right anchor for "days since closed" with no
         schema migration needed. Used for both a dry-run preview and, immediately before
         `delete_closed_jobs`, to know exactly what's about to be removed (for the pre-delete
-        export — see docs/retention-cleanup-plan.md section 3.8/4)."""
+        export — see docs/retention-cleanup-plan.md section 3.8/4).
+
+        A job you acted on is never eligible: one with an `applications` row (saved, applied,
+        interviewing, offer, rejected...) or a `job_feedback` label keeps its posting text, since
+        that is the evidence later review/calibration learns from and `applications` only holds a
+        thin snapshot (no description). Both tables key on the same (source_key, job_id)."""
         rows = self.connection.execute(
-            "SELECT * FROM jobs WHERE status='closed' AND last_seen_at < ? ORDER BY last_seen_at",
+            "SELECT * FROM jobs j WHERE j.status='closed' AND j.last_seen_at < ?"
+            " AND NOT EXISTS (SELECT 1 FROM applications a"
+            "   WHERE a.source_key=j.source_key AND a.job_id=j.job_id)"
+            " AND NOT EXISTS (SELECT 1 FROM job_feedback f"
+            "   WHERE f.source_key=j.source_key AND f.job_id=j.job_id)"
+            " ORDER BY j.last_seen_at",
             (before.isoformat(),),
         ).fetchall()
         return [dict(row) for row in rows]
 
     def delete_closed_jobs(self, before: datetime) -> dict[str, list[dict[str, Any]]]:
-        """Deletes every closed job last seen before `before`, cascading to that job's own
+        """Deletes every eligible closed job (see `find_stale_closed_jobs`: jobs with an application or
+        a feedback label are kept) last seen before `before`, cascading to that job's own
         `assessments`/`job_feedback` rows — an explicit choice (docs/retention-cleanup-plan.md
         section 3.6/4), not an oversight: neither table has a real foreign key to `jobs`, so
         leaving them behind wouldn't break anything, but a deleted job's assessment/feedback has

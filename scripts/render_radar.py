@@ -64,8 +64,9 @@ from job_hunter.active_pool import source_jobs as _pool_source_jobs
 from job_hunter.active_pool import stopped_early as _stopped_early
 from job_hunter.active_pool import wants_fallback as _wants_fallback
 from job_hunter.atomic import atomic_write_text
-from job_hunter.config import CandidateProfile, DreamConfig, load_profile, load_settings
+from job_hunter.config import CandidateProfile, DreamConfig, FitConfig, load_profile, load_settings
 from job_hunter.dream import DreamDecision, evaluate_dream
+from job_hunter.fit import FitDecision, evaluate_fit
 from job_hunter.rootutil import add_project_argument, chdir_to_project_root, nonneg_int
 from job_hunter.search_archive import resolve_search_path
 from job_hunter.storage import Storage
@@ -234,8 +235,56 @@ def _inject_assets(html: str, feature: str, additions: dict[str, str]) -> str:
     return html
 
 
-def _apply_dream_assets(html: str) -> str:
-    return _inject_assets(html, "dream", _DREAM_ADDITIONS)
+def _apply_dream_assets(html: str, *, live: bool = False) -> str:
+    # Live pages filter through radar_live_core.js (row facts), not the static template's JS.
+    additions = {k: v for k, v in _DREAM_ADDITIONS.items() if not (live and k == "js")}
+    return _inject_assets(html, "dream", additions)
+
+
+def _fit_tags(decision: FitDecision | None) -> str:
+    """Display-only fit tier + pay indicator (`fit.py`); the title attribute says why."""
+    if decision is None:
+        return ""
+    out = ""
+    if decision.tier == "top":
+        out += f'<span class="tag tag-fit-top" title="{_attr("; ".join(decision.reasons))}">&#9650; Top pick</span>'
+    elif decision.tier == "likely":
+        out += f'<span class="tag tag-fit-likely" title="{_attr("; ".join(decision.reasons))}">Likely fit</span>'
+    if decision.pay and decision.pay_top:
+        label = f"${decision.pay_top // 1000}K"
+        hint = "top of the stated range meets your pay floor" if decision.pay == "ok" else "top of the stated range is below your pay floor"
+        out += f'<span class="tag tag-pay-{decision.pay}" title="{hint}">{label}</span>'
+    return out
+
+
+# Fit-tier + pay additions, applied by `_apply_fit_assets` only when settings.radar.fit is enabled.
+_FIT_ADDITIONS = {
+    "css": (
+        "  .tag-fit-top { background: var(--status-good-soft, var(--line)); color: var(--status-good, var(--ink));"
+        " border: 1px solid currentColor; cursor: help; }\n"
+        "  .tag-fit-likely { background: transparent; color: var(--ink); border: 1px solid var(--muted); cursor: help; }\n"
+        "  .tag-pay-ok { background: var(--line); color: var(--status-good, var(--ink)); cursor: help; }\n"
+        "  .tag-pay-low { background: var(--line); color: var(--muted); text-decoration: line-through; cursor: help; }\n"
+    ),
+    "chip": (
+        '      <button type="button" class="filter-chip" data-filter-group="tag" data-filter-value="fit-top"'
+        ' title="Reviewed score and judgments say core domain, matching level, no unmet requirement">&#9650; Top picks</button>\n'
+        '      <button type="button" class="filter-chip" data-filter-group="tag" data-filter-value="fit-likely"'
+        ' title="Top picks plus other jobs worth a look">Likely fit+</button>\n'
+        '      <button type="button" class="filter-chip" data-filter-group="tag" data-filter-value="pay-ok"'
+        ' title="Top of the stated pay range meets your pay floor">Pay ok</button>\n'
+    ),
+    "js": (
+        "        if (v === 'fit-top') return row.dataset.fitTop === '1';\n"
+        "        if (v === 'fit-likely') return row.dataset.fitLikely === '1';\n"
+        "        if (v === 'pay-ok') return row.dataset.pay === 'ok';\n"
+    ),
+}
+
+
+def _apply_fit_assets(html: str, *, live: bool = False) -> str:
+    additions = {k: v for k, v in _FIT_ADDITIONS.items() if not (live and k == "js")}
+    return _inject_assets(html, "fit", additions)
 
 
 # "Apply by" deadline tag + chips, injected only when at least one job states a deadline.
@@ -290,6 +339,20 @@ def _deadline_tag(info: dict[str, Any] | None) -> str:
     return f'<span class="tag {cls}" title="{_attr(info["title"])}">&#9200; Apply by {_e(info["label"])}{left}</span>'
 
 
+def _fit_decision(
+    job: dict[str, Any], assessment: dict[str, Any] | None, fit: FitConfig | None, dream: DreamDecision | None
+) -> FitDecision | None:
+    """None when the feature is off, so no fit/pay attribute or tag is emitted."""
+    if fit is None or not fit.enabled:
+        return None
+    # Pay alone is not a reason to lower the Top-pick bar: it tags over half the radar, and pay is
+    # shown separately. Company, title and level reasons are.
+    wanted = bool(
+        dream is not None and dream.is_dream and any(not r.startswith("salary") for r in dream.reasons)
+    )
+    return evaluate_fit(job, assessment, fit, is_dream=wanted)
+
+
 def _dream_decision(job: dict[str, Any], dream: DreamConfig | None) -> DreamDecision | None:
     """None (not "not dream") when the feature is off, so no dream attribute/tag is emitted."""
     return evaluate_dream(job, dream) if dream is not None and dream.enabled else None
@@ -298,6 +361,7 @@ def _dream_decision(job: dict[str, Any], dream: DreamConfig | None) -> DreamDeci
 def _filter_data_attrs(
     *, sponsorship: str | None, arrangement: str | None, is_new: bool, is_long_standing: bool,
     dream: DreamDecision | None = None, deadline: dict[str, Any] | None = None,
+    fit: FitDecision | None = None,
 ) -> str:
     """data-* attributes the client-side filter toolbar reads directly off each row — kept as
     their own explicit attributes rather than having the toolbar's JS re-derive them from
@@ -311,9 +375,14 @@ def _filter_data_attrs(
         f' data-dream="{1 if dream.is_dream else 0}" data-dream-ish="{1 if dream.is_weak else 0}"'
         if dream is not None else ""
     )
+    fit_attr = (
+        f' data-fit-top="{1 if fit.tier == "top" else 0}" data-fit-likely="{1 if fit.tier else 0}"'
+        f' data-pay="{fit.pay or ""}"'
+        if fit is not None else ""
+    )
     return (
         f'data-sponsorship="{_attr(sponsorship or "")}" data-arrangement="{_attr(arrangement or "")}" '
-        f'data-new="{1 if is_new else 0}" data-long-standing="{1 if is_long_standing else 0}"' + dream_attr
+        f'data-new="{1 if is_new else 0}" data-long-standing="{1 if is_long_standing else 0}"' + dream_attr + fit_attr
         + (' data-deadline="1"' if deadline and not deadline["passed"] else "")
         + (' data-closing-soon="1"' if deadline and deadline["soon"] else "")
     )
@@ -457,7 +526,7 @@ def _row_html(
     # placement reintroduces the original bug: a variable-width column only misaligns
     # whatever comes *after* it, and nothing variable-width sits before .job any more.
     new_badge = '<span class="tag tag-new">New</span>' if row["new"] else ""
-    other_tags = _dream_tag(row.get("dream")) + _deadline_tag(row.get("deadline"))
+    other_tags = _dream_tag(row.get("dream")) + _fit_tags(row.get("fit")) + _deadline_tag(row.get("deadline"))
     if row.get("long_standing"):
         other_tags += '<span class="tag tag-long-standing">Long-standing</span>'
     other_tags += _stale_source_tag(row.get("stale_source_note"))
@@ -466,7 +535,7 @@ def _row_html(
     filter_attrs = _filter_data_attrs(
         sponsorship=row.get("visa_sponsorship"), arrangement=row.get("work_arrangement"),
         is_new=row["new"], is_long_standing=row.get("long_standing", False), dream=row.get("dream"),
-        deadline=row.get("deadline"),
+        deadline=row.get("deadline"), fit=row.get("fit"),
     )
     date_display = _fmt_date(row["posted_at"]) or _fmt_first_seen(row.get("first_seen_at")) or "Date unknown"
     matches_html = "".join(f"<li>{_e(m)}</li>" for m in row["matches"])
@@ -568,7 +637,7 @@ def _never_reviewed_row_html(
         undated_new_days=undated_new_days, undated_stale_days=undated_stale_days,
     )
     new_badge = '<span class="tag tag-new">New</span>' if is_new else ""
-    other_tags = _dream_tag(candidate.get("dream")) + _deadline_tag(candidate.get("deadline"))
+    other_tags = _dream_tag(candidate.get("dream")) + _fit_tags(candidate.get("fit")) + _deadline_tag(candidate.get("deadline"))
     if is_long_standing:
         other_tags += '<span class="tag tag-long-standing">Long-standing</span>'
     other_tags += _stale_source_tag(candidate.get("stale_source_note"))
@@ -577,7 +646,7 @@ def _never_reviewed_row_html(
     filter_attrs = _filter_data_attrs(
         sponsorship=candidate.get("visa_sponsorship"), arrangement=candidate.get("work_arrangement"),
         is_new=is_new, is_long_standing=is_long_standing, dream=candidate.get("dream"),
-        deadline=candidate.get("deadline"),
+        deadline=candidate.get("deadline"), fit=candidate.get("fit"),
     )
     date_display = _fmt_date(posted_at) or _fmt_first_seen(first_seen_at) or "Date unknown"
     meta_html = _job_meta_html(
@@ -964,6 +1033,7 @@ def render(
     live_state: LiveState | None = None,
     theme: ResolvedTheme | None = None,
     dream: DreamConfig | None = None,
+    fit: FitConfig | None = None,
     deadline_soon_days: int = 14,
 ) -> tuple[str, dict[str, Any]]:
     if live and live_state is None:
@@ -1002,6 +1072,7 @@ def render(
             never_reviewed_candidates.append(
                 {  # already has source_key/job_id
                     **candidate, "dream": _dream_decision(candidate, dream),
+                    "fit": _fit_decision(candidate, None, fit, _dream_decision(candidate, dream)),
                     "deadline": _deadline_info(
                         candidate.get("application_deadline"), now=now, soon_days=deadline_soon_days
                     ),
@@ -1049,6 +1120,7 @@ def render(
                 "country": candidate.get("country"),
                 "stale_source_note": candidate.get("stale_source_note"),
                 "dream": _dream_decision(candidate, dream),
+                "fit": _fit_decision(candidate, assessment, fit, _dream_decision(candidate, dream)),
                 "deadline": _deadline_info(
                     candidate.get("application_deadline"), now=now, soon_days=deadline_soon_days
                 ),
@@ -1176,9 +1248,14 @@ def render(
     # Single pass: substituted text is never rescanned, so data containing a token is inert.
     out = re.sub(r"__[A-Z][A-Z0-9_]*__", lambda m: tokens.get(m.group(0), m.group(0)), template)
     if dream is not None and dream.enabled:
-        out = _apply_dream_assets(out)
+        out = _apply_dream_assets(out, live=live)
+    if fit is not None and fit.enabled:
+        out = _apply_fit_assets(out, live=live)
     if any(r.get("deadline") for r in rows) or any(c.get("deadline") for c in never_reviewed_candidates):
-        out = _inject_assets(out, "deadline", _DEADLINE_ADDITIONS)
+        out = _inject_assets(
+            out, "deadline",
+            {k: v for k, v in _DEADLINE_ADDITIONS.items() if not (live and k == "js")},
+        )
     return out, {
         "strong": len(strong),
         "review": len(review),
@@ -1304,6 +1381,7 @@ def selection_render_kwargs(
         collection_fallback=not args.no_collection_fallback,
         theme=resolve_page_theme(args, settings, profile),
         dream=settings.radar.dream,
+        fit=settings.radar.fit,
         deadline_soon_days=settings.radar.deadline_soon_days,
     )
 

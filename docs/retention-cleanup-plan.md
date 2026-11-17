@@ -281,3 +281,8 @@ request:
   `scan_reports()` call that the real `soft_exclude_terms_removed_2026-09-05.html` (and another
   hand-named file, `default_2026-08-31_original-116.html`, found live) are both correctly excluded
   from the 35 real files that *do* match a generated pattern.
+
+
+## Addendum (2026-11-15): jobs you acted on are kept
+
+`Storage.find_stale_closed_jobs` excludes any job with an `applications` row or a `job_feedback` label (`NOT EXISTS` on the same `(source_key, job_id)`). The posting text is the evidence review calibration learns from, and `applications` stores no description. This supersedes the section 3.6/4 cascade for labelled jobs only; unlabelled jobs still cascade to their assessments as before.

@@ -190,7 +190,14 @@ ranked `SearchResult` JSON.
   before matching (Torc's Greenhouse postings render `—` as literal `&mdash;` inside a separator
   `<span>`). `storage.py`'s `reevaluate_salary()`/`reevaluate_sponsorship()` (also CLI commands)
   backfill stored jobs from existing description, no network — needed since `upsert_job` only sets
-  these on fresh collection.
+  these on fresh collection. Also matches `between $X and $Y` ("and" counts only right after
+  "between", `$` on both sides). **Pay text outside the description:** `extras.salary_source_text(description,
+  extras)` is what both the collector and `reevaluate_salary()` feed to `evaluate_salary` — the description plus
+  `extras["detail"]["pay_text"]` when an adapter stored one. Apple keeps its range in the `postingFooters`
+  "Pay & Benefits" entry, not `description` (only ~66 of ~5,600 stored Apple jobs had a `$` before this), so
+  `apple.py` puts it in `pay_text` and drops the other footers; extras (not the description) so `content_hash` is
+  unchanged and no job is re-reviewed. Existing Apple jobs need `search --companies apple --refresh-details`
+  then `reevaluate-salary` to gain a salary. Another site with pay outside its description: set `pay_text`.
 
 - **`prefilter.py`** — `passes_prefilter`'s positive-term gate matches only `job.title` +
   `job.department`, never free-text `description`. Deliberate fix: description-wide matching let
@@ -341,6 +348,32 @@ ranked `SearchResult` JSON.
   application deadline (date-only -> end of that day UTC), and Phenom (Honda)/`html_paginated` (PACCAR) keep their
   JSON-LD in `extras`.
 
+- **Review prompt** (`src/job_hunter/review_prompt.py`, `scripts/review_with_lm_studio.py`, skill `job-reviewer` 1.4.0) — the
+  local model answers `domain_fit` (core/adjacent/off, judged by *technology area*, not job function), `seniority_fit`,
+  `blockers`, then `matches`/`gaps`/`score`/`recommended`, in that order (judgments before the number). `apply_caps` then clamps
+  the score deterministically (off 49, adjacent 74, any blocker 69; seniority is recorded but sets no ceiling) and writes every clamp into `gaps`
+  with the model's own number. The system prompt carries a profile-derived domain definition and a `CANDIDATE HISTORY` block
+  (applied/interviewed/offer/saved roles and roles tagged irrelevant, built once per run so the prefix is identical for every
+  job; context only, never evidence of skills). Descriptions are sent boilerplate-stripped and head+tail trimmed to ~6,000
+  chars (stored text and `content_hash` untouched). New columns `assessments.domain_fit/seniority_fit/blockers` (migration v9);
+  older assessments have none and stay valid. Existing scores are never re-run by a prompt change (cache keys on `content_hash`).
+- **Fit tier and pay tag** (`src/job_hunter/fit.py`, `settings.radar.fit`, off by default) — display-only "Top pick" / "Likely fit"
+  tags + chips and a separate pay tag (top of a stated USD annual range vs `pay_floor_usd`), computed at render time from the
+  score and, when present, the judgments above. Pay is kept apart from fit on purpose: a role you would take but whose pay is
+  below the floor stays a Top pick with a struck-through pay tag. Never hides anything. Assets are injected conditionally like
+  Dream; live pages filter through `radar_live_core.js` facts (the static template's JS anchors do not exist there).
+  Calibration lesson (gold set = your interviews/applications): `strong_relevance_terms` evidence and title similarity to acted-on
+  jobs *lowered* recall (12/24 vs 16/24 at score>=75) and removed none of the irrelevant jobs, so neither is a gate or a tier input.
+- **Model bake-off** (`scripts/bakeoff_models.py`, `scripts/build_golden_jobs.py`, `docs/bakeoff/`) — compares local LM Studio models and
+  thinking modes (`off` = `reasoning_effort: "none"`, the only switch that works; `/no_think` does nothing) on a golden set built from your
+  own applications and labels (positives = acted on, negatives = tagged irrelevant), through the real review prompt. A run that cannot
+  finish inside its time budget is **did-not-finish**: listed apart, no quality numbers, off the table. `--publish` appends aggregates only
+  (hardware, prompt commit, golden id; never a company, title or job key) to `docs/bakeoff/results.csv` + `RESULTS.md`; per-job output
+  stays in git-ignored `data/golden/`. `tests/test_bakeoff_models.py` fails if a golden title or key leaks into `docs/bakeoff/`. Compare
+  a new model by running it together with the current default on the same golden set and prompt, never against rows whose `golden_id`
+  or `prompt_commit` differ. See `docs/bakeoff/README.md`. The review reads `reasoning: off|low|default` from `config/lm_studio.yaml`
+  (sent as `reasoning_effort`; a bare YAML `off` parses to `False` and is handled) and retries a malformed answer once.
+- **`cleanup` keeps jobs you acted on** — `find_stale_closed_jobs` skips any job with an `applications` row or a `job_feedback` label.
 - **`scripts/refilter_archive.py`** — answers "what would this already-collected archive's
   candidates look like under the *current* profile," no network. Rebuilds `candidates` from
   SQLite's current `status='active' AND us_eligible=1` pool, scoped to the archive's own
@@ -496,7 +529,7 @@ ranked `SearchResult` JSON.
   is treated as unassessed again. Lets `job-hunter`'s per-job sub-agent review skip already-scored
   jobs at zero token cost.
 
-  No table ever deletes rows automatically — 230MB after 9 days, 98.5% `jobs.description`, closed
+  `find_stale_closed_jobs` (used by both the cleanup dry run and delete) never selects a job that has an `applications` row or a `job_feedback` label, so the posting text you acted on survives for later calibration (`applications` keeps only a thin snapshot, no description). No table ever deletes rows automatically — 230MB after 9 days, 98.5% `jobs.description`, closed
   rows kept forever. `job-hunter cleanup` (`cleanup.py`, opt-in, dry-run by default,
   `docs/retention-cleanup-plan.md`) is the answer, reusing `last_seen_at` as a free "days since
   closed" clock (`mark_missing()` never touches it on close — it already means "last confirmed

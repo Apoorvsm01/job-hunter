@@ -2784,3 +2784,49 @@ async def test_workday_department_facet_failure_never_fails_the_listing(facet, f
         jobs = await adapter.fetch_summaries()
     assert len(jobs) == 3  # the listing itself is intact
     assert all(j.department is None for j in jobs)  # a failed pass applies nothing, never a partial map
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_apple_pay_footer_goes_to_extras_not_description():
+    """Apple keeps the stated base-pay range in a "Pay & Benefits" posting footer, not in
+    `description`. It must land in extras["pay_text"] (read by salary_source_text) and leave the
+    description, hence content_hash, untouched."""
+    from job_hunter.extras import salary_source_text
+    from job_hunter.salary import evaluate_salary
+
+    pay = (
+        "<p>The base pay range for this role is between $150,400 and $277,600, and your base "
+        "pay will depend on your skills.</p>"
+    )
+    detail_data = {
+        "loaderData": {
+            "jobDetails": {
+                "jobsData": {
+                    "description": "Full description.",
+                    "postDateInGMT": "2026-07-17T16:51:18.167+00:00",
+                    "locations": [
+                        {"city": "Cupertino", "stateProvince": "California", "countryName": "United States"}
+                    ],
+                    "postingFooters": [
+                        {"localizations": {"en_US": [{"name": "Pay & Benefits", "content": pay}]}},
+                        {"localizations": {"en_US": [{"name": "EEO Statement", "content": "<p>EEO.</p>"}]}},
+                    ],
+                }
+            }
+        }
+    }
+    url = "https://jobs.apple.com/en-us/details/200694620-3749/hardware-system-validation-engineer"
+    respx.get(url).mock(return_value=httpx.Response(200, text=_hydration_html(detail_data)))
+    company = CompanyConfig(key="apple", company="Apple", adapter="apple", config={"list_url": "https://jobs.apple.com/en-us/search"})
+    summary = JobSummary(
+        source_key="apple", source_platform="apple", company="Apple", job_id="200694620-3749", title="X", url=url
+    )
+    async with httpx.AsyncClient() as client:
+        detail = await AppleAdapter(company, client, CollectionConfig(max_retries=0)).fetch_detail(summary)
+    assert detail.description == "Full description."
+    assert "150,400" in detail.extras["pay_text"]
+    assert "postingFooters" not in detail.extras
+    assert evaluate_salary(detail.description).min_value is None
+    decision = evaluate_salary(salary_source_text(detail.description, {"detail": detail.extras}))
+    assert (decision.min_value, decision.max_value) == (150400.0, 277600.0)

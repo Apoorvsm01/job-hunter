@@ -74,6 +74,18 @@ radar:
     # The whole published range counts: a job qualifies when the TOP of its USD range is >= this
     # (e.g. $128K-$209K qualifies at 160000). Jobs with no published salary just skip this rule.
     min_salary_usd: 160000
+  # Display-only "Top pick" / "Likely fit" tags, filter chips and a separate pay tag (src/job_hunter/fit.py).
+  # Tiers come from the local model's score (after its deterministic caps) and, for assessments that
+  # carry them, its domain/level/blocker judgments. A Dream job reaches "Top pick" at likely_min_score.
+  # Never hides a job and never feeds scoring. Pay is kept apart from fit: it compares the TOP of a
+  # stated annual USD range with pay_floor_usd. Off unless enabled (the radar renders exactly as before).
+  fit:
+    enabled: false
+    top_min_score: 78            # assessments that carry the judgments (core + level match + no blocker)
+    likely_min_score: 70         # also the Dream bar for Top pick (company/title/level reasons, not pay alone)
+    legacy_top_min_score: 85     # older assessments: score only, stricter bars
+    legacy_likely_min_score: 75
+    pay_floor_usd: 160000
   # Flag a posting's "apply before" date as "closing soon" when it is within this many days.
   deadline_soon_days: 14
 

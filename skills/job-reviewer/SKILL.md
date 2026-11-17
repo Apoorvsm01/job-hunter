@@ -1,6 +1,6 @@
 ---
 name: job-reviewer
-version: 1.2.1
+version: 1.4.0
 description: Score job-hunter's archived candidates against the user's resume using a local LLM (LM Studio) — resumes automatically from wherever a prior run left off, never spends cloud/agent tokens.
 compatibility: Requires uv and Python 3.11+; LM Studio required (local model scoring via its OpenAI-compatible API).
 metadata:
