@@ -348,10 +348,10 @@ ranked `SearchResult` JSON.
   application deadline (date-only -> end of that day UTC), and Phenom (Honda)/`html_paginated` (PACCAR) keep their
   JSON-LD in `extras`.
 
-- **Review prompt** (`src/job_hunter/review_prompt.py`, `scripts/review_with_lm_studio.py`, skill `job-reviewer` 1.3.0) — the
+- **Review prompt** (`src/job_hunter/review_prompt.py`, `scripts/review_with_lm_studio.py`, skill `job-reviewer` 1.4.0) — the
   local model answers `domain_fit` (core/adjacent/off, judged by *technology area*, not job function), `seniority_fit`,
   `blockers`, then `matches`/`gaps`/`score`/`recommended`, in that order (judgments before the number). `apply_caps` then clamps
-  the score deterministically (off 49, adjacent 74, any blocker 69, level not "match" 74) and writes every clamp into `gaps`
+  the score deterministically (off 49, adjacent 74, any blocker 69; seniority is recorded but sets no ceiling) and writes every clamp into `gaps`
   with the model's own number. The system prompt carries a profile-derived domain definition and a `CANDIDATE HISTORY` block
   (applied/interviewed/offer/saved roles and roles tagged irrelevant, built once per run so the prefix is identical for every
   job; context only, never evidence of skills). Descriptions are sent boilerplate-stripped and head+tail trimmed to ~6,000

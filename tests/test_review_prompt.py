@@ -6,7 +6,6 @@ from job_hunter.review_prompt import (
     CAP_ADJACENT,
     CAP_BLOCKER,
     CAP_OFF_DOMAIN,
-    CAP_SENIORITY,
     MAX_DESCRIPTION_CHARS,
     ModelVerdict,
     apply_caps,
@@ -48,14 +47,18 @@ def test_empty_blocker_words_do_not_count_as_blockers():
         ({"domain_fit": "off"}, CAP_OFF_DOMAIN),
         ({"domain_fit": "adjacent"}, CAP_ADJACENT),
         ({"blockers": ["TS/SCI clearance required"]}, CAP_BLOCKER),
-        ({"seniority_fit": "above"}, CAP_SENIORITY),
-        ({"seniority_fit": "below"}, CAP_SENIORITY),
     ],
 )
 def test_caps_clamp_the_score_and_say_so(over, cap):
     out = apply_caps(_verdict(score=92, **over), threshold=75)
     assert out["score"] == min(cap, 92)
     assert any(f"capped at {cap}" in g and "model scored 92" in g for g in out["gaps"])
+
+
+@pytest.mark.parametrize("level", ["above", "below"])
+def test_seniority_never_caps_the_score(level):
+    out = apply_caps(_verdict(score=92, seniority_fit=level), threshold=75)
+    assert out["score"] == 92 and out["recommended"] is True and out["gaps"] == ["c"]
 
 
 def test_strictest_cap_wins_and_everything_that_set_it_is_named():

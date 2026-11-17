@@ -94,11 +94,15 @@ Apply a strict, evidence-based standard:
     lower one. A matching job title or method alone never earns a high score.
 12. Fill in the judgments BEFORE the score; they decide how high the score can go. A system
     applies ceilings after you answer: domain_fit "off" caps the score at 49, "adjacent" at 74,
-    any blocker at 69, and a seniority_fit other than "match" at 74. Be accurate on the
-    judgments; they matter more than the exact number.
+    any blocker at 69. seniority_fit sets no ceiling: it is recorded for the reader. Be accurate
+    on the judgments; they matter more than the exact number.
     - domain_fit: use the DOMAIN DEFINITION below.
     - seniority_fit: "match" unless the posting's stated level or years clearly exceed ("above")
-      or sit well under ("below") what the resume evidences.
+      or sit well under ("below") what the resume evidences. A lead or manager role inside the
+      candidate's core domain is a "match" when the resume shows the same technical work and
+      leading projects or teams; a missing organisation-wide, people-management or strategy scope
+      is a gap to name, not by itself a reason for "below" or a lower score. Do not lower the score
+      for seniority beyond what the requirements you can actually check justify.
     - blockers: hard requirements the resume clearly does not meet (a required clearance,
       license, degree, or years of a specific skill). Empty list when there are none. A
       preferred qualification is never a blocker.

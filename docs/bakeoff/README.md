@@ -38,6 +38,7 @@ Read the tables in `RESULTS.md`, then these limits:
   on recall: 22 of 33 wanted jobs at 70 or more against 25-26 of 34, AUC 0.987 against 0.991-0.992. Stripping only the contact block
   and URLs cannot change a verdict and saves tokens and privacy, so that is what to enable; leave `compact_sections` empty unless your
   own bake-off says otherwise. The published row marked `resume view: on` is the condensed variant.
+- **Seniority ceiling removed (job-reviewer 1.4.0):** a level mismatch used to cap a score at 74. With no ceiling and a prompt that treats a lead role in the core domain as a match, Gemma (off) scored AUC 1.000, 0 of 60 irrelevant jobs at 70 or more and 24 of 34 wanted at 70 or more, with 97 of 97 valid answers. Recall did not improve (25-26 of 34 before): the missed jobs score 58-68 because the model itself lists missing people-management or organisation-wide scope as gaps, not because of the ceiling. The row's prompt commit reads `271c680-dirty` (the change was committed after the run).
 - Thinking-on runs that did not finish are listed in `RESULTS.md` without quality numbers.
 
 ## Run it on your machine

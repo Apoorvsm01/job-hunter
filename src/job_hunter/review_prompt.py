@@ -32,7 +32,8 @@ SeniorityFit = Literal["below", "match", "above"]
 CAP_OFF_DOMAIN = 49
 CAP_ADJACENT = 74
 CAP_BLOCKER = 69
-CAP_SENIORITY = 74
+# No ceiling for seniority: a level mismatch is shown as a tag, never used to lower a job's score by rule
+# (2026-11-16: it was ranking real V&V lead roles below the "Likely fit" line). Never gate on level.
 
 MAX_DESCRIPTION_CHARS = 6000
 _TAIL_CHARS = 1500
@@ -76,8 +77,6 @@ def apply_caps(verdict: dict[str, Any], *, threshold: int) -> dict[str, Any]:
         ceilings.append((CAP_ADJACENT, "role is only adjacent to the candidate's domain"))
     if out["blockers"]:
         ceilings.append((CAP_BLOCKER, "unmet hard requirement: " + "; ".join(out["blockers"])))
-    if out["seniority_fit"] != "match":
-        ceilings.append((CAP_SENIORITY, f"seniority is {out['seniority_fit']} the candidate's level"))
     if ceilings:
         cap, _ = min(ceilings, key=lambda c: c[0])
         if out["score"] > cap:
