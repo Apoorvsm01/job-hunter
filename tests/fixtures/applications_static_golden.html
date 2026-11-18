@@ -41,6 +41,8 @@
   .app-delete { font: inherit; font-size: 13px; padding: 6px 12px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: var(--danger); cursor: pointer; }
   .app-empty { color: var(--muted); padding: 24px 0; }
   .live-bar { position: fixed; bottom: 24px; right: 24px; z-index: 10; display: flex; flex-direction: column; align-items: flex-end; gap: 6px; font-family: "IBM Plex Mono", monospace; font-size: 12px; }
+  .live-bar { pointer-events: none; }
+  .live-bar > * { pointer-events: auto; }
   .live-pill, .live-notice, .live-reload, .live-archive { padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); box-shadow: var(--shadow); }
   .live-pill[data-state="live"] { color: var(--accent); }
   .live-pill[data-state="offline"] { background: var(--accent); color: var(--surface); }
@@ -131,9 +133,16 @@ Sent a note</textarea></label><button type="button" class="app-delete">Delete</b
   }
 
   // Indices of `factsList` in display order. Stable: ties keep original (server) order.
-  function sortOrder(factsList, mode) {
+  // `sunk` (optional, parallel to factsList) marks rows that always go below the rest, keeping
+  // their relative order (thumbs-down jobs, as of the last page load).
+  function sortOrder(factsList, mode, sunk) {
     var idx = factsList.map(function (_, i) { return i; });
-    if (mode === 'default') return idx;
+    function sinkLast(order) {
+      if (!sunk) return order;
+      return order.filter(function (i) { return !sunk[i]; })
+        .concat(order.filter(function (i) { return sunk[i]; }));
+    }
+    if (mode === 'default') return sinkLast(idx);
     function cmp(a, b) {
       var x = factsList[a], y = factsList[b], d = 0;
       if (mode === 'score') {
@@ -145,7 +154,7 @@ Sent a note</textarea></label><button type="button" class="app-delete">Delete</b
       }
       return d || a - b;
     }
-    return idx.sort(cmp);
+    return sinkLast(idx.sort(cmp));
   }
 
   function encodeHash(f) {

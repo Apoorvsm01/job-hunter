@@ -131,6 +131,10 @@
     if (o.payload.label) labels[o.key] = o.payload.label; else delete labels[o.key];
   });
   function pendingKeys() { return sync.pending('feedback'); }
+  // Thumbs-down jobs drop to the bottom of their section on the next page load. Fixed here, at
+  // load, so tagging a row never makes it jump while you are still working through the list.
+  var sunkAtLoad = {};
+  Object.keys(labels).forEach(function (k) { if (labels[k] === 'irrelevant') sunkAtLoad[k] = true; });
 
   // ---- application tracking --------------------------------------------------------------
   var APP_LABEL = {
@@ -451,7 +455,8 @@
       if (ok) visible += 1;
     });
     containers.forEach(function (c) {
-      var order = L.sortOrder(c.original.map(function (r) { return factsOf.get(r); }), f.sort);
+      var order = L.sortOrder(c.original.map(function (r) { return factsOf.get(r); }), f.sort,
+        c.original.map(function (r) { return !!sunkAtLoad[keyOf(r)]; }));
       order.forEach(function (i) { c.div.appendChild(c.original[i]); });
       var shown = c.original.filter(function (r) { return !r.hidden; }).length;
       var group = c.div.closest('details.group');

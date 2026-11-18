@@ -284,3 +284,11 @@ test('isNewOffer fires only when a status newly becomes offer', () => {
   assert.equal(core.isNewOffer('offer', 'rejected'), false);
   assert.equal(core.isNewOffer('offer', null), false); // stop tracking
 });
+
+test('sortOrder: sunk rows go below the rest in every mode, keeping their order', () => {
+  const list = [facts({ score: 90 }), facts({ score: 70 }), facts({ score: 80 }), facts({ score: 60 })];
+  const sunk = [true, false, false, true];
+  assert.deepEqual(core.sortOrder(list, 'default', sunk), [1, 2, 0, 3]);
+  assert.deepEqual(core.sortOrder(list, 'score', sunk), [2, 1, 0, 3]);
+  assert.deepEqual(core.sortOrder(list, 'score'), [0, 2, 1, 3]); // no sunk: unchanged
+});

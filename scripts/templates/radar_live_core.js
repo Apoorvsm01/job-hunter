@@ -64,9 +64,16 @@
   }
 
   // Indices of `factsList` in display order. Stable: ties keep original (server) order.
-  function sortOrder(factsList, mode) {
+  // `sunk` (optional, parallel to factsList) marks rows that always go below the rest, keeping
+  // their relative order (thumbs-down jobs, as of the last page load).
+  function sortOrder(factsList, mode, sunk) {
     var idx = factsList.map(function (_, i) { return i; });
-    if (mode === 'default') return idx;
+    function sinkLast(order) {
+      if (!sunk) return order;
+      return order.filter(function (i) { return !sunk[i]; })
+        .concat(order.filter(function (i) { return sunk[i]; }));
+    }
+    if (mode === 'default') return sinkLast(idx);
     function cmp(a, b) {
       var x = factsList[a], y = factsList[b], d = 0;
       if (mode === 'score') {
@@ -78,7 +85,7 @@
       }
       return d || a - b;
     }
-    return idx.sort(cmp);
+    return sinkLast(idx.sort(cmp));
   }
 
   function encodeHash(f) {
