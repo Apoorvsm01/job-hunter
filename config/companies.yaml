@@ -1820,6 +1820,8 @@ companies:
       total_path: items.0.TotalJobsCount
       detail_base_url: https://fa-espx-saasfaprod1.fa.ocs.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitionDetails/
       detail_description_path: [ExternalDescriptionStr, ExternalResponsibilitiesStr, ExternalQualificationsStr]
+      # "Apply Before" on the page = ExternalPostedEndDate (detail call only; verified on job 2438627: 2026-11-30T17:00:00Z = 11/30 12:00 PM ET)
+      detail_deadline_path: ExternalPostedEndDate
       public_url_template: https://fa-espx-saasfaprod1.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1/job/{id}
       fields:
         id: Id
