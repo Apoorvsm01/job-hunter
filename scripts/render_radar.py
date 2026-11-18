@@ -926,6 +926,11 @@ _LIVE_STYLE = """
   .toolbar-num, .toolbar-select { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: inherit; }
   .toolbar-num { width: 64px; }
   .live-bar { position: fixed; bottom: 24px; right: 24px; z-index: 10; display: flex; flex-direction: column; align-items: flex-end; gap: 6px; font-family: "IBM Plex Mono", monospace; font-size: 12px; }
+  /* The bar is a right-aligned column whose own box is as wide as its widest child, so the empty space
+     beside a narrower pill used to eat clicks meant for a row's "View posting" link underneath. Only the
+     pills and buttons themselves take the pointer. */
+  .live-bar { pointer-events: none; }
+  .live-bar > * { pointer-events: auto; }
   .live-pill { padding: 8px 14px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); box-shadow: var(--shadow); font-weight: 600; }
   .live-pill[data-state="live"] { color: var(--accent); }
   .live-pill[data-state="saving"] { color: var(--ink-soft); }

@@ -1820,3 +1820,11 @@ def test_dream_by_pay_alone_does_not_lower_the_top_pick_bar():
     title = DreamDecision("dream", ("title: supervisor", "salary: $200,000"))
     assert render_radar._fit_decision({}, judged, cfg, pay_only).tier == "likely"
     assert render_radar._fit_decision({}, judged, cfg, title).tier == "top"
+
+
+def test_live_bar_does_not_swallow_clicks_meant_for_rows(tmp_path):
+    """The fixed status bar's own box is as wide as its widest child; without pointer-events: none on
+    the container, the empty space beside a narrower pill blocked a row's "View posting" link."""
+    html, _ = _live_html(tmp_path)
+    assert ".live-bar { pointer-events: none; }" in html
+    assert ".live-bar > * { pointer-events: auto; }" in html
