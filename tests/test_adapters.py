@@ -2830,3 +2830,57 @@ async def test_apple_pay_footer_goes_to_extras_not_description():
     assert evaluate_salary(detail.description).min_value is None
     decision = evaluate_salary(salary_source_text(detail.description, {"detail": detail.extras}))
     assert (decision.min_value, decision.max_value) == (150400.0, 277600.0)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_oracle_hcm_pay_range_from_by_id_flex_field():
+    """Opt-in `detail_by_id_url`: the finder=ById record carries a tenant's custom "Pay Range"
+    flex field; it is stored as extras pay_text (with `$`) and parses as a salary."""
+    by_id = {
+        "items": [
+            {
+                "Id": "42",
+                "ExternalDescriptionStr": "<p>Test the thing.</p>",
+                "ExternalPostedEndDate": "2026-12-01T17:00:00+00:00",
+                "requisitionFlexFields": [
+                    {"Prompt": "Relocation Eligible?", "Value": "No"},
+                    {"Prompt": "Pay Range", "Value": "100,000.00 - 150,000.00 USD ANNUAL"},
+                ],
+            }
+        ]
+    }
+    route = respx.get(url__regex=r"https://jobs\.example/detail.*finder=ById.*").mock(
+        return_value=httpx.Response(200, json=by_id)
+    )
+    company = CompanyConfig(
+        key="acme",
+        company="Acme",
+        adapter="oracle_hcm",
+        config={
+            "list_url": "https://jobs.example/reqs",
+            "detail_base_url": "https://jobs.example/old/",
+            "detail_by_id_url": "https://jobs.example/detail?finder=ById;Id=%22{id}%22",
+            "detail_description_path": ["ExternalDescriptionStr"],
+            "detail_deadline_path": "ExternalPostedEndDate",
+            "pay_flex_prompt": "Pay Range",
+            "public_url_template": "https://jobs.example/job/{id}",
+            "fields": {"id": "Id", "title": "Title", "url": "Id"},
+        },
+    )
+    summary = JobSummary(
+        source_key="acme",
+        source_platform="oracle_hcm",
+        company="Acme",
+        job_id="42",
+        title="Role",
+        url="https://jobs.example/job/42",
+        raw={"Id": "42", "Title": "Role"},
+    )
+    async with httpx.AsyncClient() as client:
+        detail = await OracleHcmAdapter(company, client, CollectionConfig(max_retries=0)).fetch_detail(summary)
+    assert route.called
+    assert detail.extras["pay_text"] == "$100,000.00 - $150,000.00 USD ANNUAL"
+    assert detail.application_deadline is not None
+    result = evaluate_salary(detail.extras["pay_text"])
+    assert (result.min_value, result.max_value) == (100000.0, 150000.0)

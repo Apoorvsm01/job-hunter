@@ -1822,6 +1822,11 @@ companies:
       detail_description_path: [ExternalDescriptionStr, ExternalResponsibilitiesStr, ExternalQualificationsStr]
       # "Apply Before" on the page = ExternalPostedEndDate (detail call only; verified on job 2438627: 2026-11-30T17:00:00Z = 11/30 12:00 PM ET)
       detail_deadline_path: ExternalPostedEndDate
+      # "Pay Range" ("105,600.00 - 158,400.00 USD ANNUAL") is a tenant custom field, `requisitionFlexFields`,
+      # returned only by the candidate page's own call (`finder=ById`); the path-style detail above has it
+      # empty. Verified on job 2438627. Stored as extras `pay_text` (see extras.salary_source_text).
+      detail_by_id_url: https://fa-espx-saasfaprod1.fa.ocs.oraclecloud.com/hcmRestApi/resources/latest/recruitingCEJobRequisitionDetails?expand=all&onlyData=true&finder=ById;Id=%22{id}%22,siteNumber=CX_1
+      pay_flex_prompt: Pay Range
       public_url_template: https://fa-espx-saasfaprod1.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX_1/job/{id}
       fields:
         id: Id

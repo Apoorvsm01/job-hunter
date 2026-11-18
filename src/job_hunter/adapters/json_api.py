@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from urllib.parse import urljoin
 
-from ..extras import compact_extras, description_keys
+from ..extras import PAY_TEXT_KEY, compact_extras, description_keys
 from ..location import detect_arrangement
 from ..models import JobDetail, JobSummary, WorkArrangement
 from ..normalizer import fallback_job_id, parse_flexible_date, stringify
@@ -104,8 +104,8 @@ class ConfigurableJsonAdapter(JobAdapter):
             fields = cfg.get("fields", {})
             raw_url = str(nested(summary.raw, fields.get("url", "url"), "")).strip()
             api_url = urljoin(cfg.get("detail_base_url", summary.url), raw_url)
-        response = await self.request("GET", api_url)
-        payload = response.json()
+        response = await self.request("GET", self.detail_api_url(summary, api_url))
+        payload = self.detail_payload(response.json())
         description = _concat_description(payload, description_path)
         deadline_path = cfg.get("detail_deadline_path")
         department_path = cfg.get("detail_department_path")
@@ -115,8 +115,29 @@ class ConfigurableJsonAdapter(JobAdapter):
             application_deadline=(
                 parse_flexible_date(nested(payload, deadline_path)) if deadline_path else None
             ),
-            extras=compact_extras(payload, skip_keys=description_keys(cfg)) or None,
+            extras=self._detail_extras(payload, description_keys(cfg)),
         )
+
+    def _detail_extras(self, payload: dict, skip_keys) -> dict | None:
+        extras = compact_extras(payload, skip_keys=skip_keys)
+        pay = self.pay_text(payload)
+        if pay:
+            extras[PAY_TEXT_KEY] = pay
+        return extras or None
+
+    def detail_api_url(self, summary: JobSummary, api_url: str) -> str:
+        """Hook: a platform whose useful detail record lives at another URL than the one the
+        listing implies (opt-in; the default is the url already built)."""
+        return api_url
+
+    def detail_payload(self, payload):
+        """Hook: unwrap an envelope around the detail record (default: as returned)."""
+        return payload
+
+    def pay_text(self, payload: dict) -> str | None:
+        """Hook: pay wording kept outside the description (stored in extras, see
+        `extras.salary_source_text`); default none."""
+        return None
 
     def augment_description(self, payload: dict, description: str | None) -> str | None:
         """Hook for a platform that keeps a fact (e.g. pay) in structured fields outside the
