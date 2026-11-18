@@ -86,6 +86,7 @@ radar:
     legacy_top_min_score: 85     # older assessments: score only, stricter bars
     legacy_likely_min_score: 75
     pay_floor_usd: 160000
+    show_pay: true               # false hides the pay tag and the "Pay ok" chip, keeps Top pick / Likely fit
   # Flag a posting's "apply before" date as "closing soon" when it is within this many days.
   deadline_soon_days: 14
 

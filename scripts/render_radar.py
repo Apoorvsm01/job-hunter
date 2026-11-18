@@ -55,7 +55,7 @@ import argparse
 import html
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -282,8 +282,13 @@ _FIT_ADDITIONS = {
 }
 
 
-def _apply_fit_assets(html: str, *, live: bool = False) -> str:
+def _apply_fit_assets(html: str, *, live: bool = False, show_pay: bool = True) -> str:
     additions = {k: v for k, v in _FIT_ADDITIONS.items() if not (live and k == "js")}
+    if not show_pay:
+        # no pay tag is emitted, so drop its chip (the chip is the last button of the group)
+        additions["chip"] = "".join(
+            line for line in additions["chip"].splitlines(keepends=True) if "pay-ok" not in line
+        )
     return _inject_assets(html, "fit", additions)
 
 
@@ -350,7 +355,10 @@ def _fit_decision(
     wanted = bool(
         dream is not None and dream.is_dream and any(not r.startswith("salary") for r in dream.reasons)
     )
-    return evaluate_fit(job, assessment, fit, is_dream=wanted)
+    decision = evaluate_fit(job, assessment, fit, is_dream=wanted)
+    if not fit.show_pay:
+        decision = replace(decision, pay=None, pay_top=None)
+    return decision
 
 
 def _dream_decision(job: dict[str, Any], dream: DreamConfig | None) -> DreamDecision | None:
@@ -1250,7 +1258,7 @@ def render(
     if dream is not None and dream.enabled:
         out = _apply_dream_assets(out, live=live)
     if fit is not None and fit.enabled:
-        out = _apply_fit_assets(out, live=live)
+        out = _apply_fit_assets(out, live=live, show_pay=fit.show_pay)
     if any(r.get("deadline") for r in rows) or any(c.get("deadline") for c in never_reviewed_candidates):
         out = _inject_assets(
             out, "deadline",

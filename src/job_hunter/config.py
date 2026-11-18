@@ -164,6 +164,8 @@ class FitConfig(BaseModel):
     legacy_top_min_score: int = Field(default=85, ge=0, le=100)
     legacy_likely_min_score: int = Field(default=75, ge=0, le=100)
     pay_floor_usd: int = Field(default=160000, ge=0)  # top of the stated annual range, as for Dream
+    # False hides the pay tag and the "Pay ok" chip; the fit tiers are unaffected (default keeps both).
+    show_pay: bool = True
 
 
 class RadarConfig(BaseModel):

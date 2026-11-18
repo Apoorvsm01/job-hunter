@@ -1798,6 +1798,16 @@ def test_fit_and_pay_tags_only_when_enabled(tmp_path):
     assert "facts.fitTop" in core and "facts.payOk" in core
 
 
+    # show_pay: false keeps the tiers but drops the pay tag, its data attribute and its chip
+    nopay, _ = render(fit=FitConfig(enabled=True, show_pay=False), **inputs)
+    assert "tag-fit-top" in nopay and 'data-fit-top="1"' in nopay
+    assert ">$120K</span>" not in nopay and ">$200K</span>" not in nopay
+    assert 'data-pay="low"' not in nopay and 'data-pay="ok"' not in nopay
+    assert 'data-filter-value="pay-ok"' not in nopay and 'data-filter-value="fit-top"' in nopay
+    nopay_live, _ = render(fit=FitConfig(enabled=True, show_pay=False), live=True, live_state=_live_state(), **inputs)
+    assert 'data-filter-value="pay-ok"' not in nopay_live
+
+
 def test_dream_by_pay_alone_does_not_lower_the_top_pick_bar():
     import render_radar
 
