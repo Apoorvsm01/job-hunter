@@ -389,6 +389,9 @@
     font-weight: 600;
   }
 
+  .toolbar-field { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-soft); }
+  .toolbar-num, .toolbar-select { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: inherit; }
+  .toolbar-num { width: 64px; }
   .toolbar-clear {
     font-family: "IBM Plex Mono", monospace;
     font-size: 11.5px;
@@ -922,6 +925,12 @@
       <button type="button" class="filter-chip" data-filter-group="sponsorship" data-filter-value="not_available">No Sponsorship</button>
       <button type="button" class="filter-chip" data-filter-group="hide" data-filter-value="no-sponsorship" title="Hide jobs that state they do not sponsor; keeps Sponsorship OK and unmentioned jobs">Hide No Sponsorship</button>
     </div>
+    
+    
+    <label class="toolbar-field">Min score <input type="number" id="filter-min-score" class="toolbar-num" min="0" max="100" step="5"></label>
+    <label class="toolbar-field">Posted <select id="filter-posted-days" class="toolbar-select"><option value="">any time</option><option value="7">last 7 days</option><option value="14">last 14 days</option><option value="30">last 30 days</option></select></label>
+    <label class="toolbar-field">Company <select id="filter-company" class="toolbar-select"><option value="">all</option></select></label>
+    
     <button type="button" id="filter-clear" class="toolbar-clear" hidden>Clear filters</button>
     <span class="toolbar-count" id="filter-count"></span>
   </div>
@@ -952,7 +961,7 @@
     </summary>
     <p class="group-note">Sorted by score, highest first. Tap a row for the model's evidence.</p>
     <div class="rows">
-    <details class="row tier-strong" data-sponsorship="available" data-arrangement="remote" data-new="1" data-long-standing="0">
+    <details class="row tier-strong" data-sponsorship="available" data-arrangement="remote" data-new="1" data-long-standing="0" data-score="88" data-posted="2026-08-25">
       <summary>
         <span class="score">88</span>
         <span class="job">
@@ -1011,7 +1020,7 @@
     </summary>
     <p class="group-note">Every candidate the local model scored, regardless of fit &mdash; unlikely matches, kept for completeness.</p>
     <div class="rows">
-    <details class="row tier-plain" data-sponsorship="unmentioned" data-arrangement="unknown" data-new="0" data-long-standing="0">
+    <details class="row tier-plain" data-sponsorship="unmentioned" data-arrangement="unknown" data-new="0" data-long-standing="0" data-score="41" data-posted="2026-08-20">
       <summary>
         <span class="score">41</span>
         <span class="job">
@@ -1061,7 +1070,7 @@
       model yet &mdash; no verdict to show, so no score/strengths/gaps here. Run job-reviewer to
       move these into one of the groups above.</p>
     <div class="rows">
-    <div class="plain-row" data-sponsorship="unmentioned" data-arrangement="unknown" data-new="1" data-long-standing="0">
+    <div class="plain-row" data-sponsorship="unmentioned" data-arrangement="unknown" data-new="1" data-long-standing="0" data-score="" data-posted="2026-08-22">
       <div class="plain-row-top">
         <span class="score score-nr" title="Not yet reviewed by the local model">NR</span>
         <span class="job">
@@ -1234,6 +1243,33 @@
   var clearBtn = document.getElementById('filter-clear');
   var countEl = document.getElementById('filter-count');
   var rows = Array.prototype.slice.call(document.querySelectorAll('.row, .plain-row'));
+  // Min score / Posted / Company exist on static pages only (the live page has its own).
+  var minScoreInput = document.getElementById('filter-min-score');
+  var postedSelect = document.getElementById('filter-posted-days');
+  var companySelect = document.getElementById('filter-company');
+  function rowCompany(row) {
+    var el = row.querySelector('.job-company');
+    return el ? el.textContent.trim() : '';
+  }
+  if (companySelect) {
+    var seen = {};
+    rows.forEach(function (r) { var c = rowCompany(r); if (c) seen[c] = true; });
+    Object.keys(seen).sort(function (a, b) { return a.toLowerCase().localeCompare(b.toLowerCase()); })
+      .forEach(function (c) {
+        var o = document.createElement('option');
+        o.value = c; o.textContent = c;
+        companySelect.appendChild(o);
+      });
+  }
+  function dayDiffFromToday(iso) {
+    var now = new Date();
+    var today = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
+    return Math.round((today - Date.parse(iso + 'T00:00:00Z')) / 86400000);
+  }
+  function extraFiltersActive() {
+    return !!((minScoreInput && minScoreInput.value !== '') || (postedSelect && postedSelect.value) ||
+      (companySelect && companySelect.value));
+  }
 
   function activeValues(group) {
     return chips
@@ -1261,6 +1297,16 @@
       });
       if (!matchesTag) return false;
     }
+    // AND with everything else; unscored (NR) and undated rows fail a Min score / Posted filter.
+    if (minScoreInput && minScoreInput.value !== '') {
+      var score = row.dataset.score === '' ? null : Number(row.dataset.score);
+      if (score === null || score < Number(minScoreInput.value)) return false;
+    }
+    if (postedSelect && postedSelect.value) {
+      if (!row.dataset.posted || dayDiffFromToday(row.dataset.posted) > Number(postedSelect.value)) return false;
+    }
+    if (companySelect && companySelect.value && rowCompany(row) !== companySelect.value) return false;
+
     var arrangementValues = activeValues('arrangement');
     if (arrangementValues.length && arrangementValues.indexOf(row.dataset.arrangement) === -1) return false;
 
@@ -1293,7 +1339,7 @@
       if (matches) visible++;
     });
     countEl.textContent = rows.length ? ('Showing ' + visible + ' of ' + rows.length) : '';
-    var anyActive = searchInput.value.trim() !== '' || chips.some(function (c) { return c.classList.contains('active'); });
+    var anyActive = searchInput.value.trim() !== '' || extraFiltersActive() || chips.some(function (c) { return c.classList.contains('active'); });
     clearBtn.hidden = !anyActive;
     updateEmptyStates();
   }
@@ -1306,9 +1352,13 @@
   });
 
   searchInput.addEventListener('input', applyFilters);
+  [minScoreInput, postedSelect, companySelect].forEach(function (el) {
+    if (el) el.addEventListener(el === minScoreInput ? 'input' : 'change', applyFilters);
+  });
 
   clearBtn.addEventListener('click', function () {
     searchInput.value = '';
+    [minScoreInput, postedSelect, companySelect].forEach(function (el) { if (el) el.value = ''; });
     chips.forEach(function (c) { c.classList.remove('active'); });
     applyFilters();
   });

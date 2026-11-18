@@ -431,6 +431,15 @@ def _job_meta_html(location: str | None, salary_evidence: str | None, salary_tie
     return " · ".join(parts)
 
 
+def _static_row_attrs(score: int | None, posted_at: str | None) -> str:
+    """Score + posted day for the static page's Min score / Posted filters (live rows get these
+    from `_live_row_attrs`). Company is read from the visible `.job-company` text."""
+    posted = (posted_at or "")[:10]
+    if not _ISO_DAY.fullmatch(posted):
+        posted = ""
+    return f' data-score="{"" if score is None else score}" data-posted="{posted}"'
+
+
 def _live_row_attrs(
     *, source_key: str, job_id: str, score: int | None, posted_at: str | None,
     state: str | None, country: str | None, salary_evidence: str | None, app_status: str = "",
@@ -581,7 +590,7 @@ def _row_html(
             salary_evidence=row.get("salary_evidence"), app_status=app["status"] if app else "",
         )
         if live
-        else ""
+        else _static_row_attrs(row["score"], row.get("posted_at"))
     )
     tagged = " fb-tagged" if label else ""
     return f'''
@@ -680,7 +689,7 @@ def _never_reviewed_row_html(
             salary_evidence=candidate.get("salary_evidence"), app_status=app["status"] if app else "",
         )
         if live
-        else ""
+        else _static_row_attrs(None, posted_at)
     )
     tagged = " fb-tagged" if label else ""
     return f'''
@@ -919,6 +928,12 @@ _LIVE_STATIC_BLOCKS = (
     ('<script>\n(function () {\n  // Per-job relevance feedback', "</script>"),
     ('<script>\n(function () {\n  // Quick-glance client-side filtering', "</script>"),
 )
+
+_STATIC_FIELDS = """
+    <label class="toolbar-field">Min score <input type="number" id="filter-min-score" class="toolbar-num" min="0" max="100" step="5"></label>
+    <label class="toolbar-field">Posted <select id="filter-posted-days" class="toolbar-select"><option value="">any time</option><option value="7">last 7 days</option><option value="14">last 14 days</option><option value="30">last 30 days</option></select></label>
+    <label class="toolbar-field">Company <select id="filter-company" class="toolbar-select"><option value="">all</option></select></label>
+    """
 
 _LIVE_STYLE = """
   .live-toolbar-extra { display: contents; }
@@ -1209,12 +1224,14 @@ def render(
         live_tokens = {
             "__LIVE_STYLE__": _LIVE_STYLE,
             "__LIVE_TOOLBAR__": _LIVE_TOOLBAR,
+            "__STATIC_FIELDS__": "",
             "__LIVE_SCRIPT__": _live_script_html(live_state, search_path.stem),
             "__LIVE_BAR__": _live_bar_html(live_state, sources),
         }
     else:
         live_tokens = {
             "__LIVE_STYLE__": "", "__LIVE_TOOLBAR__": "", "__LIVE_SCRIPT__": "", "__LIVE_BAR__": "",
+            "__STATIC_FIELDS__": _STATIC_FIELDS,
         }
     feedback = live_state.feedback if live_state else None
     apps = live_state.applications if live_state else None
