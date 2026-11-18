@@ -950,6 +950,11 @@ _LIVE_STYLE = """
   .app-panel { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 12px 18px; align-items: flex-end; padding: 10px 16px 14px 74px; }
   .plain-row > .app-panel { padding-left: 74px; border-top: 1px dashed var(--line); }
   .app-panel[hidden] { display: none; }
+  .app-menu { position: fixed; z-index: 20; display: flex; flex-direction: column; min-width: 150px; padding: 4px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); box-shadow: 0 6px 20px rgba(0,0,0,.18); }
+  .app-menu[hidden] { display: none; }
+  .app-menu button { font: inherit; font-size: 13px; text-align: left; padding: 6px 10px; border: 0; border-radius: 6px; background: transparent; color: var(--ink); cursor: pointer; }
+  .app-menu button:hover { background: var(--accent-soft); color: var(--accent); }
+  .app-menu button.on { font-weight: 600; color: var(--accent); }
   .app-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--ink-soft); }
   .app-field select, .app-field input, .app-field textarea { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: inherit; }
   .app-field-notes { flex: 1 1 260px; }

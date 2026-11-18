@@ -1254,7 +1254,7 @@
     }
     var tagValues = activeValues('tag');
     if (tagValues.length) {
-      var matchesTag = tagValues.some(function (v) {
+      var matchesTag = tagValues.every(function (v) {  // AND: every selected tag
         if (v === 'new') return row.dataset.new === '1';
         if (v === 'long-standing') return row.dataset.longStanding === '1';
         return false;

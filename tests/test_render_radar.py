@@ -1828,3 +1828,12 @@ def test_live_bar_does_not_swallow_clicks_meant_for_rows(tmp_path):
     html, _ = _live_html(tmp_path)
     assert ".live-bar { pointer-events: none; }" in html
     assert ".live-bar > * { pointer-events: auto; }" in html
+
+
+def test_live_track_pill_opens_a_status_menu_without_expanding_the_row():
+    from pathlib import Path
+
+    root = Path(__file__).parents[1] / "scripts"
+    assert ".app-menu {" in (root / "render_radar.py").read_text(encoding="utf-8")
+    js = (root / "templates" / "radar_live_ui.js").read_text(encoding="utf-8")
+    assert "buildStatusMenu" in js and "Notes & date" in js
