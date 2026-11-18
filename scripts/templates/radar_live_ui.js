@@ -131,6 +131,10 @@
     if (o.payload.label) labels[o.key] = o.payload.label; else delete labels[o.key];
   });
   function pendingKeys() { return sync.pending('feedback'); }
+  // Thumbs-down jobs drop to the bottom of their section on the next page load. Fixed here, at
+  // load, so tagging a row never makes it jump while you are still working through the list.
+  var sunkAtLoad = {};
+  Object.keys(labels).forEach(function (k) { if (labels[k] === 'irrelevant') sunkAtLoad[k] = true; });
 
   // ---- application tracking --------------------------------------------------------------
   var APP_LABEL = {
@@ -223,18 +227,76 @@
     applyFilters();
   }
 
+  // The pill opens a small status menu, so a status can be set without expanding the row.
+  // "Notes & date..." (and plain, non-collapsible rows) still use the full panel.
+  var statusMenu = null, menuRow = null;
+  function closeStatusMenu() {
+    if (statusMenu) statusMenu.hidden = true;
+    menuRow = null;
+  }
+  function buildStatusMenu() {
+    var m = document.createElement('div');
+    m.className = 'app-menu';
+    m.hidden = true;
+    var items = [['', 'Not tracking']].concat(Object.keys(APP_LABEL).map(function (k) { return [k, APP_LABEL[k]]; }));
+    items.concat([['__more', 'Notes & date\u2026']]).forEach(function (it) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.dataset.value = it[0];
+      b.textContent = it[1];
+      m.appendChild(b);
+    });
+    m.addEventListener('click', function (e) {
+      var b = e.target.closest('button');
+      if (!b || !menuRow) return;
+      var row = menuRow, panel = row.querySelector('.app-panel');
+      closeStatusMenu();
+      if (b.dataset.value === '__more') {
+        row.open = true; panel.hidden = false;
+        panel.querySelector('.app-notes').focus();
+        return;
+      }
+      var sel = panel.querySelector('.app-status');
+      if (sel.value === b.dataset.value) return;
+      sel.value = b.dataset.value;
+      saveApp(row);
+    });
+    document.body.appendChild(m);
+    return m;
+  }
   document.addEventListener('click', function (evt) {
     var chip = evt.target.closest ? evt.target.closest('.app-chip') : null;
-    if (!chip) return;
+    if (!chip) {
+      if (statusMenu && !statusMenu.hidden && !(evt.target.closest && evt.target.closest('.app-menu'))) closeStatusMenu();
+      return;
+    }
     // Nested inside <summary>: keep the click from toggling the row.
     evt.preventDefault();
     evt.stopPropagation();
     var row = chip.closest(ROW_SELECTOR), panel = row && row.querySelector('.app-panel');
     if (!panel) return;
-    if (row.tagName === 'DETAILS') { row.open = true; panel.hidden = false; }
-    else { panel.hidden = !panel.hidden; }
-    if (!panel.hidden) panel.querySelector('.app-status').focus();
+    if (row.tagName !== 'DETAILS') {
+      panel.hidden = !panel.hidden;
+      if (!panel.hidden) panel.querySelector('.app-status').focus();
+      return;
+    }
+    if (!statusMenu) statusMenu = buildStatusMenu();
+    if (!statusMenu.hidden && menuRow === row) { closeStatusMenu(); return; }
+    menuRow = row;
+    var cur = apps[keyOf(row)] ? apps[keyOf(row)].status : '';
+    Array.prototype.forEach.call(statusMenu.children, function (b) {
+      b.classList.toggle('on', b.dataset.value === cur);
+    });
+    var r = chip.getBoundingClientRect();
+    statusMenu.hidden = false;
+    var below = r.bottom + 4, h = statusMenu.offsetHeight;
+    if (below + h > window.innerHeight - 8) below = Math.max(8, r.top - h - 4);
+    statusMenu.style.top = below + 'px';
+    statusMenu.style.left = Math.max(8, Math.min(r.left, window.innerWidth - statusMenu.offsetWidth - 8)) + 'px';
   });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeStatusMenu(); });
+  window.addEventListener('scroll', closeStatusMenu, true);
+
   document.addEventListener('change', function (evt) {
     var field = evt.target.closest ? evt.target.closest('.app-status, .app-date, .app-notes') : null;
     if (!field) return;
@@ -451,7 +513,8 @@
       if (ok) visible += 1;
     });
     containers.forEach(function (c) {
-      var order = L.sortOrder(c.original.map(function (r) { return factsOf.get(r); }), f.sort);
+      var order = L.sortOrder(c.original.map(function (r) { return factsOf.get(r); }), f.sort,
+        c.original.map(function (r) { return !!sunkAtLoad[keyOf(r)]; }));
       order.forEach(function (i) { c.div.appendChild(c.original[i]); });
       var shown = c.original.filter(function (r) { return !r.hidden; }).length;
       var group = c.div.closest('details.group');

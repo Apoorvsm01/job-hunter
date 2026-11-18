@@ -1798,6 +1798,16 @@ def test_fit_and_pay_tags_only_when_enabled(tmp_path):
     assert "facts.fitTop" in core and "facts.payOk" in core
 
 
+    # show_pay: false keeps the tiers but drops the pay tag, its data attribute and its chip
+    nopay, _ = render(fit=FitConfig(enabled=True, show_pay=False), **inputs)
+    assert "tag-fit-top" in nopay and 'data-fit-top="1"' in nopay
+    assert ">$120K</span>" not in nopay and ">$200K</span>" not in nopay
+    assert 'data-pay="low"' not in nopay and 'data-pay="ok"' not in nopay
+    assert 'data-filter-value="pay-ok"' not in nopay and 'data-filter-value="fit-top"' in nopay
+    nopay_live, _ = render(fit=FitConfig(enabled=True, show_pay=False), live=True, live_state=_live_state(), **inputs)
+    assert 'data-filter-value="pay-ok"' not in nopay_live
+
+
 def test_dream_by_pay_alone_does_not_lower_the_top_pick_bar():
     import render_radar
 
@@ -1810,3 +1820,20 @@ def test_dream_by_pay_alone_does_not_lower_the_top_pick_bar():
     title = DreamDecision("dream", ("title: supervisor", "salary: $200,000"))
     assert render_radar._fit_decision({}, judged, cfg, pay_only).tier == "likely"
     assert render_radar._fit_decision({}, judged, cfg, title).tier == "top"
+
+
+def test_live_bar_does_not_swallow_clicks_meant_for_rows(tmp_path):
+    """The fixed status bar's own box is as wide as its widest child; without pointer-events: none on
+    the container, the empty space beside a narrower pill blocked a row's "View posting" link."""
+    html, _ = _live_html(tmp_path)
+    assert ".live-bar { pointer-events: none; }" in html
+    assert ".live-bar > * { pointer-events: auto; }" in html
+
+
+def test_live_track_pill_opens_a_status_menu_without_expanding_the_row():
+    from pathlib import Path
+
+    root = Path(__file__).parents[1] / "scripts"
+    assert ".app-menu {" in (root / "render_radar.py").read_text(encoding="utf-8")
+    js = (root / "templates" / "radar_live_ui.js").read_text(encoding="utf-8")
+    assert "buildStatusMenu" in js and "Notes & date" in js

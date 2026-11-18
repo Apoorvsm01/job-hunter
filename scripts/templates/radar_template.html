@@ -389,6 +389,9 @@
     font-weight: 600;
   }
 
+  .toolbar-field { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-soft); }
+  .toolbar-num, .toolbar-select { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: inherit; }
+  .toolbar-num { width: 64px; }
   .toolbar-clear {
     font-family: "IBM Plex Mono", monospace;
     font-size: 11.5px;
@@ -922,7 +925,9 @@ __LIVE_STYLE__</style>
       <button type="button" class="filter-chip" data-filter-group="sponsorship" data-filter-value="not_available">No Sponsorship</button>
       <button type="button" class="filter-chip" data-filter-group="hide" data-filter-value="no-sponsorship" title="Hide jobs that state they do not sponsor; keeps Sponsorship OK and unmentioned jobs">Hide No Sponsorship</button>
     </div>
-    __LIVE_TOOLBAR__<button type="button" id="filter-clear" class="toolbar-clear" hidden>Clear filters</button>
+    __LIVE_TOOLBAR__
+    __STATIC_FIELDS__
+    <button type="button" id="filter-clear" class="toolbar-clear" hidden>Clear filters</button>
     <span class="toolbar-count" id="filter-count"></span>
   </div>
 
@@ -1129,6 +1134,33 @@ __LIVE_STYLE__</style>
   var clearBtn = document.getElementById('filter-clear');
   var countEl = document.getElementById('filter-count');
   var rows = Array.prototype.slice.call(document.querySelectorAll('.row, .plain-row'));
+  // Min score / Posted / Company exist on static pages only (the live page has its own).
+  var minScoreInput = document.getElementById('filter-min-score');
+  var postedSelect = document.getElementById('filter-posted-days');
+  var companySelect = document.getElementById('filter-company');
+  function rowCompany(row) {
+    var el = row.querySelector('.job-company');
+    return el ? el.textContent.trim() : '';
+  }
+  if (companySelect) {
+    var seen = {};
+    rows.forEach(function (r) { var c = rowCompany(r); if (c) seen[c] = true; });
+    Object.keys(seen).sort(function (a, b) { return a.toLowerCase().localeCompare(b.toLowerCase()); })
+      .forEach(function (c) {
+        var o = document.createElement('option');
+        o.value = c; o.textContent = c;
+        companySelect.appendChild(o);
+      });
+  }
+  function dayDiffFromToday(iso) {
+    var now = new Date();
+    var today = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
+    return Math.round((today - Date.parse(iso + 'T00:00:00Z')) / 86400000);
+  }
+  function extraFiltersActive() {
+    return !!((minScoreInput && minScoreInput.value !== '') || (postedSelect && postedSelect.value) ||
+      (companySelect && companySelect.value));
+  }
 
   function activeValues(group) {
     return chips
@@ -1149,13 +1181,23 @@ __LIVE_STYLE__</style>
     }
     var tagValues = activeValues('tag');
     if (tagValues.length) {
-      var matchesTag = tagValues.some(function (v) {
+      var matchesTag = tagValues.every(function (v) {  // AND: every selected tag
         if (v === 'new') return row.dataset.new === '1';
         if (v === 'long-standing') return row.dataset.longStanding === '1';
         return false;
       });
       if (!matchesTag) return false;
     }
+    // AND with everything else; unscored (NR) and undated rows fail a Min score / Posted filter.
+    if (minScoreInput && minScoreInput.value !== '') {
+      var score = row.dataset.score === '' ? null : Number(row.dataset.score);
+      if (score === null || score < Number(minScoreInput.value)) return false;
+    }
+    if (postedSelect && postedSelect.value) {
+      if (!row.dataset.posted || dayDiffFromToday(row.dataset.posted) > Number(postedSelect.value)) return false;
+    }
+    if (companySelect && companySelect.value && rowCompany(row) !== companySelect.value) return false;
+
     var arrangementValues = activeValues('arrangement');
     if (arrangementValues.length && arrangementValues.indexOf(row.dataset.arrangement) === -1) return false;
 
@@ -1188,7 +1230,7 @@ __LIVE_STYLE__</style>
       if (matches) visible++;
     });
     countEl.textContent = rows.length ? ('Showing ' + visible + ' of ' + rows.length) : '';
-    var anyActive = searchInput.value.trim() !== '' || chips.some(function (c) { return c.classList.contains('active'); });
+    var anyActive = searchInput.value.trim() !== '' || extraFiltersActive() || chips.some(function (c) { return c.classList.contains('active'); });
     clearBtn.hidden = !anyActive;
     updateEmptyStates();
   }
@@ -1201,9 +1243,13 @@ __LIVE_STYLE__</style>
   });
 
   searchInput.addEventListener('input', applyFilters);
+  [minScoreInput, postedSelect, companySelect].forEach(function (el) {
+    if (el) el.addEventListener(el === minScoreInput ? 'input' : 'change', applyFilters);
+  });
 
   clearBtn.addEventListener('click', function () {
     searchInput.value = '';
+    [minScoreInput, postedSelect, companySelect].forEach(function (el) { if (el) el.value = ''; });
     chips.forEach(function (c) { c.classList.remove('active'); });
     applyFilters();
   });

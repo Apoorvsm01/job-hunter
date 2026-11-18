@@ -629,3 +629,25 @@ def test_main_exits_cleanly_and_releases_the_lock_after_shutdown(tmp_path, monke
     assert "Stopping." in capsys.readouterr().out
     with run_lock("radar-server"):  # lock was released
         pass
+
+
+@pytest.mark.parametrize("exc_type", [BrokenPipeError, ConnectionResetError])
+def test_a_browser_that_hangs_up_mid_page_is_dropped_quietly(exc_type, capfd):
+    """A reload while the multi-MB page is still sending must not log a traceback or raise."""
+    class Gone:
+        def write(self, _data):
+            raise exc_type()
+
+        def flush(self):
+            pass
+
+    handler = object.__new__(serve_radar.RadarHandler)
+    handler.wfile = Gone()
+    handler.request_version = "HTTP/1.1"
+    handler.requestline = "GET / HTTP/1.1"
+    handler.command = "GET"
+    handler.client_address = ("127.0.0.1", 1)
+    handler.close_connection = False
+    handler._send(200, b"x" * 10, "text/html")
+    assert handler.close_connection is True
+    assert "Traceback" not in "".join(capfd.readouterr())

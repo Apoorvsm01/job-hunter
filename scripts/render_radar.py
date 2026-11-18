@@ -55,7 +55,7 @@ import argparse
 import html
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -282,8 +282,13 @@ _FIT_ADDITIONS = {
 }
 
 
-def _apply_fit_assets(html: str, *, live: bool = False) -> str:
+def _apply_fit_assets(html: str, *, live: bool = False, show_pay: bool = True) -> str:
     additions = {k: v for k, v in _FIT_ADDITIONS.items() if not (live and k == "js")}
+    if not show_pay:
+        # no pay tag is emitted, so drop its chip (the chip is the last button of the group)
+        additions["chip"] = "".join(
+            line for line in additions["chip"].splitlines(keepends=True) if "pay-ok" not in line
+        )
     return _inject_assets(html, "fit", additions)
 
 
@@ -350,7 +355,10 @@ def _fit_decision(
     wanted = bool(
         dream is not None and dream.is_dream and any(not r.startswith("salary") for r in dream.reasons)
     )
-    return evaluate_fit(job, assessment, fit, is_dream=wanted)
+    decision = evaluate_fit(job, assessment, fit, is_dream=wanted)
+    if not fit.show_pay:
+        decision = replace(decision, pay=None, pay_top=None)
+    return decision
 
 
 def _dream_decision(job: dict[str, Any], dream: DreamConfig | None) -> DreamDecision | None:
@@ -421,6 +429,15 @@ def _job_meta_html(location: str | None, salary_evidence: str | None, salary_tie
         hint = f' title="{_attr(" | ".join(lines))}"' if len(lines) > 1 else ""
         parts.append(f'<span class="job-salary"{hint}>{_e(salary_evidence)}</span>')
     return " · ".join(parts)
+
+
+def _static_row_attrs(score: int | None, posted_at: str | None) -> str:
+    """Score + posted day for the static page's Min score / Posted filters (live rows get these
+    from `_live_row_attrs`). Company is read from the visible `.job-company` text."""
+    posted = (posted_at or "")[:10]
+    if not _ISO_DAY.fullmatch(posted):
+        posted = ""
+    return f' data-score="{"" if score is None else score}" data-posted="{posted}"'
 
 
 def _live_row_attrs(
@@ -573,7 +590,7 @@ def _row_html(
             salary_evidence=row.get("salary_evidence"), app_status=app["status"] if app else "",
         )
         if live
-        else ""
+        else _static_row_attrs(row["score"], row.get("posted_at"))
     )
     tagged = " fb-tagged" if label else ""
     return f'''
@@ -672,7 +689,7 @@ def _never_reviewed_row_html(
             salary_evidence=candidate.get("salary_evidence"), app_status=app["status"] if app else "",
         )
         if live
-        else ""
+        else _static_row_attrs(None, posted_at)
     )
     tagged = " fb-tagged" if label else ""
     return f'''
@@ -912,12 +929,23 @@ _LIVE_STATIC_BLOCKS = (
     ('<script>\n(function () {\n  // Quick-glance client-side filtering', "</script>"),
 )
 
+_STATIC_FIELDS = """
+    <label class="toolbar-field">Min score <input type="number" id="filter-min-score" class="toolbar-num" min="0" max="100" step="5"></label>
+    <label class="toolbar-field">Posted <select id="filter-posted-days" class="toolbar-select"><option value="">any time</option><option value="7">last 7 days</option><option value="14">last 14 days</option><option value="30">last 30 days</option></select></label>
+    <label class="toolbar-field">Company <select id="filter-company" class="toolbar-select"><option value="">all</option></select></label>
+    """
+
 _LIVE_STYLE = """
   .live-toolbar-extra { display: contents; }
   .toolbar-field { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-soft); }
   .toolbar-num, .toolbar-select { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: inherit; }
   .toolbar-num { width: 64px; }
   .live-bar { position: fixed; bottom: 24px; right: 24px; z-index: 10; display: flex; flex-direction: column; align-items: flex-end; gap: 6px; font-family: "IBM Plex Mono", monospace; font-size: 12px; }
+  /* The bar is a right-aligned column whose own box is as wide as its widest child, so the empty space
+     beside a narrower pill used to eat clicks meant for a row's "View posting" link underneath. Only the
+     pills and buttons themselves take the pointer. */
+  .live-bar { pointer-events: none; }
+  .live-bar > * { pointer-events: auto; }
   .live-pill { padding: 8px 14px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface); box-shadow: var(--shadow); font-weight: 600; }
   .live-pill[data-state="live"] { color: var(--accent); }
   .live-pill[data-state="saving"] { color: var(--ink-soft); }
@@ -937,6 +965,11 @@ _LIVE_STYLE = """
   .app-panel { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 12px 18px; align-items: flex-end; padding: 10px 16px 14px 74px; }
   .plain-row > .app-panel { padding-left: 74px; border-top: 1px dashed var(--line); }
   .app-panel[hidden] { display: none; }
+  .app-menu { position: fixed; z-index: 20; display: flex; flex-direction: column; min-width: 150px; padding: 4px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); box-shadow: 0 6px 20px rgba(0,0,0,.18); }
+  .app-menu[hidden] { display: none; }
+  .app-menu button { font: inherit; font-size: 13px; text-align: left; padding: 6px 10px; border: 0; border-radius: 6px; background: transparent; color: var(--ink); cursor: pointer; }
+  .app-menu button:hover { background: var(--accent-soft); color: var(--accent); }
+  .app-menu button.on { font-weight: 600; color: var(--accent); }
   .app-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--ink-soft); }
   .app-field select, .app-field input, .app-field textarea { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: inherit; }
   .app-field-notes { flex: 1 1 260px; }
@@ -1191,12 +1224,14 @@ def render(
         live_tokens = {
             "__LIVE_STYLE__": _LIVE_STYLE,
             "__LIVE_TOOLBAR__": _LIVE_TOOLBAR,
+            "__STATIC_FIELDS__": "",
             "__LIVE_SCRIPT__": _live_script_html(live_state, search_path.stem),
             "__LIVE_BAR__": _live_bar_html(live_state, sources),
         }
     else:
         live_tokens = {
             "__LIVE_STYLE__": "", "__LIVE_TOOLBAR__": "", "__LIVE_SCRIPT__": "", "__LIVE_BAR__": "",
+            "__STATIC_FIELDS__": _STATIC_FIELDS,
         }
     feedback = live_state.feedback if live_state else None
     apps = live_state.applications if live_state else None
@@ -1250,7 +1285,7 @@ def render(
     if dream is not None and dream.enabled:
         out = _apply_dream_assets(out, live=live)
     if fit is not None and fit.enabled:
-        out = _apply_fit_assets(out, live=live)
+        out = _apply_fit_assets(out, live=live, show_pay=fit.show_pay)
     if any(r.get("deadline") for r in rows) or any(c.get("deadline") for c in never_reviewed_candidates):
         out = _inject_assets(
             out, "deadline",

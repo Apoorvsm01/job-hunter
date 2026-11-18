@@ -24,12 +24,27 @@ test('query matches company or title, case-insensitively', () => {
   assert.equal(core.rowPasses(facts(), f, null, TODAY), false);
 });
 
-test('tag chips are a union (some), as in the static toolbar', () => {
+test('tag chips AND together: a job needs every selected tag', () => {
   const f = core.emptyFilters();
-  f.tags = ['new', 'long-standing'];
+  f.tags = ['new', 'dream'];
+  assert.equal(core.rowPasses(facts({ isNew: true, dream: true }), f, null, TODAY), true);
+  assert.equal(core.rowPasses(facts({ isNew: true }), f, null, TODAY), false);
+  assert.equal(core.rowPasses(facts({ dream: true }), f, null, TODAY), false);
+  f.tags = ['new'];
   assert.equal(core.rowPasses(facts({ isNew: true }), f, null, TODAY), true);
-  assert.equal(core.rowPasses(facts({ longStanding: true }), f, null, TODAY), true);
-  assert.equal(core.rowPasses(facts(), f, null, TODAY), false);
+});
+
+test('tags AND with other filters, and Hide No Sponsorship always wins', () => {
+  const f = core.emptyFilters();
+  f.tags = ['new', 'dream'];
+  f.minScore = 70;
+  const job = { isNew: true, dream: true, score: 80 };
+  assert.equal(core.rowPasses(facts(job), f, null, TODAY), true);
+  assert.equal(core.rowPasses(facts(Object.assign({}, job, { score: 60 })), f, null, TODAY), false);
+  f.hideNoSponsorship = true;
+  assert.equal(core.rowPasses(facts(Object.assign({}, job, { sponsorship: 'not_available' })), f, null, TODAY), false);
+  f.sponsorship = ['not_available'];
+  assert.equal(core.rowPasses(facts(Object.assign({}, job, { sponsorship: 'not_available' })), f, null, TODAY), false);
 });
 
 test('min score excludes unreviewed (null score) rows once set', () => {
@@ -283,4 +298,12 @@ test('isNewOffer fires only when a status newly becomes offer', () => {
   assert.equal(core.isNewOffer('applied', 'applied'), false);
   assert.equal(core.isNewOffer('offer', 'rejected'), false);
   assert.equal(core.isNewOffer('offer', null), false); // stop tracking
+});
+
+test('sortOrder: sunk rows go below the rest in every mode, keeping their order', () => {
+  const list = [facts({ score: 90 }), facts({ score: 70 }), facts({ score: 80 }), facts({ score: 60 })];
+  const sunk = [true, false, false, true];
+  assert.deepEqual(core.sortOrder(list, 'default', sunk), [1, 2, 0, 3]);
+  assert.deepEqual(core.sortOrder(list, 'score', sunk), [2, 1, 0, 3]);
+  assert.deepEqual(core.sortOrder(list, 'score'), [0, 2, 1, 3]); // no sunk: unchanged
 });
