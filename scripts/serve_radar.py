@@ -396,13 +396,18 @@ class RadarHandler(BaseHTTPRequestHandler):
         sys.stderr.write("radar-server: " + (format % args) + "\n")
 
     def _send(self, status: int, body: bytes, content_type: str) -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            # The browser gave up before the page finished (reload, closed tab, navigated away
+            # mid-transfer of a multi-MB page). Nothing to answer and nothing wrong: drop quietly.
+            self.close_connection = True
 
     def _json(self, status: int, payload: dict[str, Any]) -> None:
         self._send(status, json.dumps(payload).encode("utf-8"), "application/json; charset=utf-8")
